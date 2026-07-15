@@ -1,0 +1,12 @@
+# Caddy saca y renueva el certificado HTTPS automáticamente (gratis).
+# Reemplaza tudominio.com por tu dominio real. Coloca este archivo en /etc/caddy/Caddyfile.
+
+# --- Webhook de WhatsApp (lo llama Meta) ---
+tudominio.com {
+    reverse_proxy 127.0.0.1:8000
+}
+
+# --- Dashboard de administración (protegido con contraseña en la app) ---
+panel.tudominio.com {
+    reverse_proxy 127.0.0.1:8080
+}

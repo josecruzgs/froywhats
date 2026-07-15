@@ -1,0 +1,16 @@
+# Secretos — NUNCA subir
+.env
+data/
+
+# Entorno y caché
+.venv/
+__pycache__/
+*.pyc
+
+# Material pesado / privado
+videos/
+transcripts/
+models/
+
+# Sistema
+.DS_Store

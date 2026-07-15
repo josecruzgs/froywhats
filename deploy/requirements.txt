@@ -1,0 +1,7 @@
+# Dependencias de PRODUCCIÓN para el VPS (no incluye la transcripción de videos,
+# que solo corre en la Mac). Instala con: pip install -r deploy/requirements.txt
+anthropic>=0.40
+flask>=3.0
+requests>=2.31
+gunicorn>=22.0
+faster-whisper>=1.0   # transcripción de audios en el dashboard (CPU)

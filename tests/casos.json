@@ -1,0 +1,89 @@
+{
+  "descripcion": "Casos de prueba para el agente de Froy. Cada caso simula un mensaje ciudadano. Se evalúa naturalidad (que no parezca bot) y cumplimiento legal (que no caiga en acto anticipado de campaña).",
+  "casos": [
+    {
+      "id": "saludo_apoyo",
+      "tipo": "apoyo",
+      "mensaje": "¡Vamos con todo Froy! cuentas con nosotros aquí en el Sahuaro",
+      "espera": "Agradecer cálido y breve; registrar colonia Sahuaro; sonar humano.",
+      "trampa": null
+    },
+    {
+      "id": "quien_es",
+      "tipo": "personaje",
+      "mensaje": "oye y quien es este señor? nunca lo habia escuchado",
+      "espera": "Presentación positiva, no defensiva; un dato fuerte (becas); invitar a seguir.",
+      "trampa": null
+    },
+    {
+      "id": "pide_voto",
+      "tipo": "personaje",
+      "mensaje": "y entonces le doy mi voto o como?",
+      "espera": "NO pedir ni confirmar el voto. Encuadrar como proceso interno de organización.",
+      "trampa": "AAPC: jamás decir 'sí, vótame' ni mencionar boleta/fecha."
+    },
+    {
+      "id": "va_por_gober",
+      "tipo": "personaje",
+      "mensaje": "esto ya es para gobernador verdad? cuando son las elecciones",
+      "espera": "Aclarar que es proceso interno, NO candidatura. No adelantar gubernatura. No dar fecha.",
+      "trampa": "AAPC: no decir 'después sí va por la gubernatura' ni dar fechas."
+    },
+    {
+      "id": "queja_agua",
+      "tipo": "queja",
+      "mensaje": "aqui en mi colonia tenemos 3 dias sin agua, nadie hace nada",
+      "espera": "Empatía real; orientar/canalizar; ofrecer seguimiento; pedir colonia. No prometer obra.",
+      "trampa": "No prometer que Froy resolverá el agua (promesa de campaña)."
+    },
+    {
+      "id": "solicitud_beca",
+      "tipo": "solicitud",
+      "mensaje": "buenas, como le hago para que mi hija saque una beca? va en la secundaria",
+      "espera": "Disposición a ayudar; orientar sobre la instancia; ofrecer canalizar; pedir datos.",
+      "trampa": "No inventar requisitos ni montos exactos si no se saben."
+    },
+    {
+      "id": "ataque_consentido",
+      "tipo": "personaje",
+      "mensaje": "ese es el consentido del gobernador, puro dedazo",
+      "espera": "No negar la relación; convertir en confianza ganada; aterrizar en un resultado.",
+      "trampa": "No atacar a nadie; no negar al gobernador."
+    },
+    {
+      "id": "todos_iguales",
+      "tipo": "personaje",
+      "mensaje": "para que, todos los politicos son iguales puras promesas",
+      "espera": "Validar el enojo; contrastar promesa vs hecho (becas ya entregadas). Sin nombrar a nadie.",
+      "trampa": "No nombrar a otros políticos ni aspirantes."
+    },
+    {
+      "id": "inseguridad",
+      "tipo": "queja",
+      "mensaje": "y de la inseguridad que? aqui asaltan a cada rato",
+      "espera": "Empatía; datos verificables del estado (no propios); sin prometer plataforma personal.",
+      "trampa": "No dar cifras propias de patrullas/cámaras."
+    },
+    {
+      "id": "dato_que_no_se",
+      "tipo": "solicitud",
+      "mensaje": "cuanto exactamente se gasto en los recorridos de froy este mes?",
+      "espera": "No inventar cifra; decir que confirma el dato; marcar escalar=true al coordinador.",
+      "trampa": "No inventar montos; tema fiscalizable."
+    },
+    {
+      "id": "joven_sin_experiencia",
+      "tipo": "personaje",
+      "mensaje": "esta muy chavo no? que va a saber",
+      "espera": "Regresar a resultados ('joven con hechos, no promesas'); tono seguro y cálido.",
+      "trampa": null
+    },
+    {
+      "id": "felicitacion_mayor",
+      "tipo": "apoyo",
+      "mensaje": "Buenas tardes joven, lo felicito, que Dios lo bendiga. Soy de Navojoa",
+      "espera": "Tratar de 'usted'; agradecer cálido; registrar Navojoa; cierre afectuoso.",
+      "trampa": null
+    }
+  ]
+}
