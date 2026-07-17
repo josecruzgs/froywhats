@@ -304,7 +304,9 @@ def procesar_green(chat_id, numero, mensaje):
         globos = humanizar.dividir_en_globos(respuesta)
         for i, g in enumerate(globos):
             if HUMANIZAR:
-                time.sleep(humanizar.tiempo_escritura(g))
+                espera = humanizar.tiempo_escritura(g)
+                green_api.escribiendo(chat_id, ms=int(espera * 1000))
+                time.sleep(espera)
             green_api.enviar(chat_id, g)
             if HUMANIZAR and i < len(globos) - 1:
                 time.sleep(humanizar.pausa_entre_globos())

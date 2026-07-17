@@ -671,6 +671,11 @@ def api_conocimiento():
     files = sorted(f for f in os.listdir(KB) if f.endswith(".md"))
     return jsonify(files)
 
+@app.get("/logo.png")
+def logo():
+    from flask import send_file
+    return send_file(os.path.join(BASE, "public", "logo.png"))
+
 @app.get("/")
 def home():
     # no-store: que el navegador siempre cargue la versión más reciente tras un despliegue
@@ -681,6 +686,7 @@ def home():
 PAGINA = r"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dashboard — Agente de Froy</title>
+<link rel="icon" type="image/png" href="/logo.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -711,8 +717,7 @@ body{margin:0;background:#e7e8e1;color:var(--ink)}
 .side{width:240px;padding:24px 16px;display:flex;flex-direction:column;gap:3px;position:relative;background:var(--card)}
 .navgrp{font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#b4b8ab;padding:16px 14px 6px}
 .logo{font-weight:800;font-size:19px;padding:6px 12px 20px;display:flex;align-items:center;gap:9px;letter-spacing:-.02em}
-.dot{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--grad1),var(--grad2));box-shadow:0 0 0 5px #b5261e1a;position:relative}
-.dot::after{content:"";position:absolute;inset:6px;border-radius:50%;background:#fff;opacity:.35}
+.logoimg{width:28px;height:28px;object-fit:contain;flex-shrink:0}
 .nav{background:none;border:0;text-align:left;padding:12px 16px;border-radius:999px;font-size:14px;font-weight:600;color:#84887c;cursor:pointer;display:flex;gap:10px;align-items:center;position:relative}
 .nav:hover{color:var(--ink);background:#f2f3ee}
 .nav.active{background:var(--ink);color:#fff;box-shadow:var(--shadow)}
@@ -755,6 +760,7 @@ h1{font-size:34px;margin:0 0 4px;font-weight:800;letter-spacing:-.03em}.sub{colo
 .ctable th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;padding:8px 12px;border-bottom:1px solid var(--line)}
 .ctable td{padding:10px 12px;border-bottom:1px solid var(--line)}
 .ctable tr:last-child td{border-bottom:0}
+.ctable tbody tr:hover{background:#f7f4f3}
 .postura{font-size:11px;padding:3px 10px;border-radius:20px;font-weight:700;display:inline-block}
 .postura.simpatizante{background:#dcfce7;color:#15803d}
 .postura.neutral{background:#eef0e9;color:#63665a}
@@ -776,6 +782,10 @@ button.b1{background:var(--dark);color:#fff;border:0;border-radius:999px;padding
 button.b1:hover{background:linear-gradient(135deg,var(--grad1),var(--grad2))}
 button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-weight:600;font-size:13.5px;cursor:pointer}
 button.ok{background:#19c37d;color:#fff}button.no{background:#ff5d5d;color:#fff}
+button:disabled{opacity:.4;cursor:not-allowed}
+.subtabs{display:flex;gap:8px;margin-bottom:14px}
+.subtab{background:#fff;border:1px solid var(--line);border-radius:999px;padding:9px 18px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer}
+.subtab.active{background:var(--ink);color:#fff;border-color:var(--ink)}
 .aporte{border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
 .aporte pre{white-space:pre-wrap;font-size:12px;color:#555;background:#fafbff;padding:10px;border-radius:10px;max-height:140px;overflow:auto;font-family:inherit}
 .nota{border-left:4px solid var(--grad1);background:#fafbff;border-radius:0 12px 12px 0;padding:12px 14px;margin-bottom:10px}
@@ -811,17 +821,23 @@ button.ok{background:#19c37d;color:#fff}button.no{background:#ff5d5d;color:#fff}
 .progbar>div{height:100%;background:linear-gradient(90deg,var(--g1),var(--g2));transition:.3s}
 @media(max-width:640px){#kanban{grid-template-columns:1fr}}
 /* tarjetas de redes / kanban bonitas */
-.rcard{background:#fff;border-radius:16px;box-shadow:0 6px 18px rgba(30,40,90,.07);margin-bottom:14px;overflow:hidden;border:1px solid var(--line);transition:.15s}
-.rcard:hover{box-shadow:0 10px 26px rgba(30,40,90,.13);transform:translateY(-1px)}
-.rcard .top{height:5px}
-.rcard .body{padding:13px 15px}
+.rcard{background:#fff;border-radius:18px;box-shadow:0 4px 14px rgba(30,20,15,.05);margin-bottom:12px;border:1px solid var(--line);transition:.15s;padding:16px 18px}
+.rcard:hover{box-shadow:0 8px 22px rgba(30,20,15,.09)}
+.rhead{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.rchips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ractions-mini{display:flex;gap:4px;align-items:center}
+.iconbtn{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);border:0;cursor:pointer;background:none;flex-shrink:0}
+.iconbtn:hover{background:#f2efed;color:var(--ink)}
+.iconbtn.dgr:hover{background:#fdeaea;color:#c0392b}
+.rmeta{font-size:11px;color:var(--muted);margin-top:10px}
+.combox2{background:#f7f5f3;border-radius:12px;padding:10px 38px 10px 12px;font-size:13px;color:#4a423d;margin-top:10px;line-height:1.45;position:relative}
+.combox2 .copybtn{position:absolute;top:6px;right:6px}
 .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
 .chip.net{color:#fff}
 .chip.acc{background:#eef0f7;color:#3a4256}
 .chip.perf{background:#e8f8ee;color:var(--grad1)}
 .chip.st{background:#fff3e0;color:#c8770a}.chip.st.ok{background:#e7f8ef;color:#0a8a52}
-.combox{background:#f6f8ff;border-left:3px solid var(--g1);border-radius:0 10px 10px 0;padding:9px 11px;font-size:13px;color:#3a4256;margin:10px 0;line-height:1.4}
-.rowbtns{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px;align-items:center}
+.rowbtns{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;align-items:center}
 .btnmini{border:1px solid var(--line);background:#fff;border-radius:10px;padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;color:#3a4256;text-decoration:none;transition:.12s}
 .btnmini:hover{background:#f4f6fb;border-color:#d5dbea}
 .btnmini.pri{background:linear-gradient(135deg,var(--g1),var(--g2));color:#fff;border:0}
@@ -859,7 +875,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 </style></head><body>
 <div class="app">
   <div class="side">
-    <div class="logo"><span class="dot"></span> Froy · Panel</div>
+    <div class="logo"><img src="/logo.png" alt="" class="logoimg"> Froy · Panel</div>
     <div class="navgrp">Panel</div>
     <button class="nav active" data-t="resumen"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Resumen</button>
     <button class="nav" data-t="seguimiento"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="5" y="4" width="14" height="17" rx="2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="16" y2="15"/></svg>Seguimiento</button>
@@ -968,7 +984,18 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <!-- ESCALADOS -->
     <section id="escalados" class="hide">
       <h1>Bandeja de escalados</h1><div class="sub">Mensajes que necesitan seguimiento del coordinador <span class="tag" id="esc-count"></span></div>
-      <div class="card c4"><div id="esc-list"><span class="muted">Cargando…</span></div></div>
+      <div class="subtabs">
+        <button class="subtab active" data-esc="pendiente" onclick="cambiarEscTab('pendiente')">Por resolver</button>
+        <button class="subtab" data-esc="resuelto" onclick="cambiarEscTab('resuelto')">Resueltas</button>
+      </div>
+      <div class="card c4">
+        <div style="overflow-x:auto">
+        <table class="ctable">
+          <thead><tr><th>Fecha</th><th>Número</th><th>Ubicación</th><th>Tema</th><th>Msjs</th></tr></thead>
+          <tbody id="esc-body"><tr><td colspan="5"><span class="muted">Cargando…</span></td></tr></tbody>
+        </table>
+        </div>
+      </div>
     </section>
 
     <!-- EXPLORAR -->
@@ -1006,6 +1033,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <tbody id="ct-body"><tr><td colspan="8"><span class="muted">Cargando…</span></td></tr></tbody>
         </table>
         </div>
+        <div id="ct-pager" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px"></div>
       </div>
     </section>
 
@@ -1117,6 +1145,24 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     <div style="margin-top:14px;display:flex;gap:8px"><button class="b1" onclick="guardarEdit()">Guardar cambios</button><button class="ghost" onclick="cerrarEdit()">Cancelar</button></div>
   </div>
 </div>
+<div id="contactomodal" class="modal hide">
+  <div class="modalbox">
+    <div class="h" style="font-size:16px;margin-bottom:4px">Perfil de contacto</div>
+    <div id="ct-modal-body"></div>
+    <div style="margin-top:14px"><button class="ghost" onclick="cerrarContacto()">Cerrar</button></div>
+  </div>
+</div>
+<div id="escmodal" class="modal hide">
+  <div class="modalbox">
+    <div class="h" style="font-size:16px;margin-bottom:4px">Detalle del escalado</div>
+    <div id="esc-modal-body"></div>
+    <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="b1" id="esc-modal-btn" onclick="">Marcar resuelto</button>
+      <a class="ghost" id="esc-modal-wa" target="_blank" style="text-decoration:none;display:none">Responder por WhatsApp</a>
+      <button class="ghost" onclick="cerrarEsc()">Cerrar</button>
+    </div>
+  </div>
+</div>
 <script>
 function svg(inner,size){size=size||16;return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block align-[-3px]">${inner}</svg>`;}
 const ICONS={
@@ -1161,6 +1207,7 @@ const ICONS={
   pin:svg('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>',13),
   clock:svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',13),
   arrowup:svg('<line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/>',16),
+  copy:svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',13),
 };
 const COLICONS={porhacer:ICONS.pin,proceso:ICONS.clock,hecho:ICONS.check,evidencia:ICONS.camera};
 const $=s=>document.querySelector(s), autor=()=>document.querySelector('#autor').value||'anónimo';
@@ -1222,21 +1269,57 @@ async function cargarMapa(){
   $('#mapa-sin').innerHTML=d.puntos.length?(d.sin_coords.length?('Sin ubicar en el mapa: '+d.sin_coords.map(x=>x.municipio+' ('+x.total+')').join(', ')):''):'Aún no hay municipios capturados. Prueba el chat mencionando una ciudad.';
 }
 // --- escalados ---
+let _escList=[], _escTab='pendiente', _escCache={};
 async function cargarEscalados(){
   const it=await(await fetch('/api/escalados')).json();
-  $('#esc-count').textContent=it.filter(x=>!x.atendido).length+' pendientes';
-  $('#esc-list').innerHTML=it.length?it.map(x=>{
-    const tel=(x.numero||'').replace(/[^0-9]/g,'');
-    const wa=(tel&&x.numero!=='prueba')?`<a class="ghost" href="https://wa.me/${tel}" target="_blank" style="text-decoration:none">${ICONS.chat} Responder por WhatsApp</a>`:'';
-    return `<div class="aporte ${x.atendido?'done':''}">
-    <div class="muted">${x.fecha} · ${ICONS.phone} <b>${x.numero}</b> · ${[x.colonia,x.municipio].filter(Boolean).join(', ')||'sin ubicación'}${x.n>1?(' · '+x.n+' mensajes'):''}</div>
-    <div style="margin:5px 0">${x.mensajes.map(m=>'• '+m).join('<br>')}</div>
-    <div class="muted">tema: ${x.tema||'-'}</div>
-    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">${wa}
-      <button class="ghost ${x.atendido?'':'ok'}" onclick="atender('${x.numero}')">${x.atendido?ICONS.undo+' reabrir':ICONS.check+' marcar atendido'}</button></div></div>`;
-  }).join(''):'<span class="muted">Nada escalado todavía.</span>';
+  _escList=it;
+  _escCache={};
+  it.forEach(x=>_escCache[x.numero]=x);
+  renderEscalados();
 }
-async function atender(numero){await fetch('/api/escalados/atender',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({numero})});cargarEscalados();}
+function cambiarEscTab(tab){
+  _escTab=tab;
+  document.querySelectorAll('.subtab[data-esc]').forEach(b=>b.classList.toggle('active',b.dataset.esc===tab));
+  renderEscalados();
+}
+function renderEscalados(){
+  $('#esc-count').textContent=_escList.filter(x=>!x.atendido).length+' pendientes';
+  const filtrados=_escList.filter(x=>_escTab==='resuelto'?x.atendido:!x.atendido);
+  $('#esc-body').innerHTML=filtrados.length?filtrados.map(x=>{
+    const tema=x.tema?('<span title="'+x.tema.replace(/"/g,'&quot;')+'">'+x.tema.slice(0,50)+(x.tema.length>50?'…':'')+'</span>'):'<span class="muted">—</span>';
+    return `<tr style="cursor:pointer" onclick="abrirEsc('${x.numero}')">
+      <td class="muted">${x.fecha}</td>
+      <td>${x.numero}</td>
+      <td>${[x.colonia,x.municipio].filter(Boolean).join(', ')||'<span class="muted">—</span>'}</td>
+      <td>${tema}</td>
+      <td>${x.n}</td>
+    </tr>`;
+  }).join(''):`<tr><td colspan="5"><span class="muted">${_escTab==='resuelto'?'Nada resuelto todavía.':'No hay pendientes por ahora.'}</span></td></tr>`;
+}
+function abrirEsc(numero){
+  const x=_escCache[numero]; if(!x)return;
+  const tel=(x.numero||'').replace(/[^0-9]/g,'');
+  const fila=(lbl,val)=>`<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">${lbl}</div><div style="font-size:14px">${val}</div></div>`;
+  $('#esc-modal-body').innerHTML=
+    fila('Número', x.numero) +
+    fila('Fecha', x.fecha) +
+    fila('Ubicación', [x.colonia,x.municipio].filter(Boolean).join(', ')||'Sin datos') +
+    fila('Tema', x.tema?x.tema.replace(/</g,'&lt;'):'Sin datos') +
+    fila('Mensajes ('+x.n+')', x.mensajes.map(m=>'• '+m.replace(/</g,'&lt;')).join('<br>'));
+  const btn=$('#esc-modal-btn');
+  btn.textContent=x.atendido?'Reabrir':'Marcar resuelto';
+  btn.onclick=()=>toggleEsc(x.numero);
+  const wa=$('#esc-modal-wa');
+  if(tel&&x.numero!=='prueba'){wa.style.display='inline-block';wa.href='https://wa.me/'+tel;}
+  else wa.style.display='none';
+  $('#escmodal').classList.remove('hide');
+}
+function cerrarEsc(){$('#escmodal').classList.add('hide');}
+async function toggleEsc(numero){
+  await fetch('/api/escalados/atender',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({numero})});
+  cerrarEsc();
+  cargarEscalados();
+}
 // --- explorar ---
 async function cargarExplorar(){
   const q=$('#ex-q').value||'',tipo=$('#ex-tipo').value||'';
@@ -1248,15 +1331,30 @@ async function cargarExplorar(){
 }
 // --- contactos ---
 const POSTURA_LBL={simpatizante:'Simpatizante',neutral:'Neutral',opositor:'Opositor',sin_datos:'Sin datos'};
+const CT_POR_PAGINA=15;
+let _contactos={}, _contactosList=[], _ctPage=1;
 async function cargarContactos(){
   const q=$('#ct-q').value||'', postura=$('#ct-postura').value||'';
   const d=await(await fetch('/api/contactos?q='+encodeURIComponent(q)+'&postura='+encodeURIComponent(postura))).json();
-  $('#ct-count').textContent=d.total+' contacto'+(d.total===1?'':'s');
-  $('#ct-body').innerHTML=d.items.length?d.items.map(x=>{
+  _contactosList=d.items;
+  _contactos={};
+  d.items.forEach(x=>_contactos[x.numero]=x);
+  _ctPage=1;
+  renderContactos();
+}
+function ctIrPagina(p){_ctPage=p;renderContactos();}
+function renderContactos(){
+  const total=_contactosList.length;
+  $('#ct-count').textContent=total+' contacto'+(total===1?'':'s');
+  const totalPaginas=Math.max(1,Math.ceil(total/CT_POR_PAGINA));
+  if(_ctPage>totalPaginas)_ctPage=totalPaginas;
+  const inicio=(_ctPage-1)*CT_POR_PAGINA;
+  const pagina=_contactosList.slice(inicio,inicio+CT_POR_PAGINA);
+  $('#ct-body').innerHTML=pagina.length?pagina.map(x=>{
     const p=x.postura||'sin_datos';
     const fecha=(x.actualizado_en||'').slice(0,16).replace('T',' ');
     const tema=x.tema?('<span title="'+x.tema.replace(/"/g,'&quot;')+'">'+x.tema.slice(0,40)+(x.tema.length>40?'…':'')+'</span>'):'<span class="muted">—</span>';
-    return `<tr>
+    return `<tr style="cursor:pointer" onclick="abrirContacto('${x.numero}')">
       <td>${x.numero}</td>
       <td>${x.nombre||'<span class="muted">—</span>'}</td>
       <td>${x.ciudad||'<span class="muted">—</span>'}</td>
@@ -1267,7 +1365,30 @@ async function cargarContactos(){
       <td class="muted">${fecha}</td>
     </tr>`;
   }).join(''):'<tr><td colspan="8"><span class="muted">Todavía no hay contactos registrados.</span></td></tr>';
+  $('#ct-pager').innerHTML=total?(
+    '<button class="ghost" '+(_ctPage<=1?'disabled':'')+' onclick="ctIrPagina('+(_ctPage-1)+')">← Anterior</button>'+
+    '<span class="muted" style="padding:0 10px;font-size:13px">Página '+_ctPage+' de '+totalPaginas+'</span>'+
+    '<button class="ghost" '+(_ctPage>=totalPaginas?'disabled':'')+' onclick="ctIrPagina('+(_ctPage+1)+')">Siguiente →</button>'
+  ):'';
 }
+function abrirContacto(numero){
+  const x=_contactos[numero]; if(!x)return;
+  const p=x.postura||'sin_datos';
+  const fila=(lbl,val)=>`<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">${lbl}</div><div style="font-size:14px">${val}</div></div>`;
+  $('#ct-modal-body').innerHTML=
+    fila('Número', x.numero) +
+    fila('Nombre', x.nombre||'<span class="muted">Sin datos</span>') +
+    fila('Ciudad', x.ciudad||'<span class="muted">Sin datos</span>') +
+    fila('Colonia', x.colonia||'<span class="muted">Sin datos</span>') +
+    fila('Tema', x.tema?x.tema.replace(/</g,'&lt;'):'<span class="muted">Sin datos</span>') +
+    fila('Postura', `<span class="postura ${p}">${POSTURA_LBL[p]||p}</span>`) +
+    fila('Canal', x.canal||'—') +
+    fila('Mensajes', x.mensajes||0) +
+    fila('Primer contacto', (x.primera_vez||'').slice(0,16).replace('T',' ')||'—') +
+    fila('Última actividad', (x.actualizado_en||'').slice(0,16).replace('T',' ')||'—');
+  $('#contactomodal').classList.remove('hide');
+}
+function cerrarContacto(){$('#contactomodal').classList.add('hide');}
 // --- auditoría ---
 async function cargarAuditoria(){
   const it=await(await fetch('/api/auditoria')).json();
@@ -1303,23 +1424,23 @@ function evGrid(ev){return (ev&&ev.length)?`<div class="evgrid">${ev.map(e=>`<a 
 function tarjetaRed(x){
   const r=_ri(x.red), ev=x.evidencias||[];
   const com=(x.comentario||'').replace(/</g,'&lt;');
-  const comBox=x.comentario?`<div class="combox">${ICONS.chat} ${com} <button class="btnmini" style="padding:2px 8px;font-size:11px" onclick='copiar(this,${JSON.stringify(x.comentario)})'>copiar</button></div>`:'';
-  const edit=puedeEditar()?`<button class="btnmini" onclick="abrirEdit(${x.id})">${ICONS.edit} Editar</button>`:'';
-  const del=puedeEditar()?`<button class="btnmini dgr" onclick="delAccion(${x.id})">${ICONS.trash} Eliminar</button>`:'';
-  return `<div class="rcard"><div class="top" style="background:${r.c}"></div><div class="body">
-    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">
-      <div style="display:flex;gap:6px;flex-wrap:wrap">${chipRed(x.red)} ${chipAcc(x.accion)} ${chipPerf(x.perfil)}</div>
-      ${chipEstado(x.estado)}
+  const comBox=x.comentario?`<div class="combox2">${com}<button class="iconbtn copybtn" title="copiar texto" onclick='copiar(this,${JSON.stringify(x.comentario)})'>${ICONS.copy}</button></div>`:'';
+  const edit=puedeEditar()?`<button class="iconbtn" title="editar" onclick="abrirEdit(${x.id})">${ICONS.edit}</button>`:'';
+  const del=puedeEditar()?`<button class="iconbtn dgr" title="eliminar" onclick="delAccion(${x.id})">${ICONS.trash}</button>`:'';
+  const hecho=x.estado==='hecho';
+  return `<div class="rcard">
+    <div class="rhead">
+      <div class="rchips">${chipRed(x.red)} ${chipAcc(x.accion)} ${chipPerf(x.perfil)}</div>
+      <div class="ractions-mini">${chipEstado(x.estado)}${edit}${del}</div>
     </div>
     ${comBox}
     ${ev.length?`<div class="muted" style="font-size:12px;margin-top:9px">${ICONS.camera} ${ev.length} evidencia(s)</div>${evGrid(ev)}`:''}
-    <div class="muted" style="font-size:11px;margin-top:9px">Creado por ${x.autor||'-'} · ${x.fecha||''}</div>
+    <div class="rmeta">Creado por ${x.autor||'-'} · ${x.fecha||''}</div>
     <div class="rowbtns">
-      <a class="btnmini pri" href="${x.link}" target="_blank" rel="noopener">${ICONS.link} Abrir post</a>
+      <a class="btnmini" href="${x.link}" target="_blank" rel="noopener">${ICONS.link} Abrir post</a>
       <label class="btnmini" style="cursor:pointer">${ICONS.clip} Evidencia<input type="file" accept="image/*" hidden onchange="subirEvidencia(${x.id},this)"></label>
-      <button class="btnmini ${x.estado==='hecho'?'':'ok'}" onclick="accEstado(${x.id})">${x.estado==='hecho'?ICONS.undo+' Reabrir':ICONS.check+' Hecho'}</button>
-      ${edit}${del}
-    </div></div></div>`;
+      <button class="btnmini ${hecho?'':'ok'}" onclick="accEstado(${x.id})">${hecho?ICONS.undo+' Reabrir':ICONS.check+' Hecho'}</button>
+    </div></div>`;
 }
 async function cargarRedes(){
   const a=await(await fetch('/api/acciones')).json();
@@ -1357,7 +1478,7 @@ async function subirEvidencia(id,input){
   if(d.ok) cargarRedes(); else alert(d.error||'error al subir');
 }
 async function delAccion(id){if(confirm('¿Eliminar esta acción?')){await fetch('/api/acciones/eliminar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});cargarRedes();}}
-function copiar(btn,txt){navigator.clipboard.writeText(txt).then(()=>{const o=btn.textContent;btn.textContent='✓ copiado';setTimeout(()=>btn.textContent=o,1500);});}
+function copiar(btn,txt){navigator.clipboard.writeText(txt).then(()=>{const o=btn.innerHTML;btn.innerHTML=ICONS.check;setTimeout(()=>btn.innerHTML=o,1500);});}
 
 // --- seguimiento (kanban) ---
 const KORDER=['porhacer','proceso','hecho','evidencia'];

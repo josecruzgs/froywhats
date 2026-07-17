@@ -64,6 +64,19 @@ def enviar(chat_id, texto):
         print("Green API enviar error:", e, flush=True)
         return False
 
+def escribiendo(chat_id, ms=5000):
+    """Muestra el 'escribiendo…' en el chat por `ms` milisegundos (máx. 20000, Green API lo limita)."""
+    c = cargar_config()
+    if not configurado():
+        return False
+    try:
+        r = requests.post(f"{_base(c)}/sendTyping/{c['api_token']}",
+                          json={"chatId": chat_id, "typingTime": max(1000, min(20000, int(ms)))}, timeout=15)
+        return r.ok
+    except Exception as e:
+        print("Green API escribiendo error:", e, flush=True)
+        return False
+
 def parse_incoming(data):
     """Extrae (chatId, numero, mensaje) de una notificación de Green API, o None.
     `mensaje` es {"tipo": "texto", "texto": ...} o {"tipo": "audio", "url": ..., "mime": ...}."""
