@@ -25,10 +25,11 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _cargar_env():
     env = os.path.join(BASE, ".env")
     if os.path.exists(env):
-        for line in open(env):
+        for line in open(env, encoding="utf-8"):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
+                v = v.split(" #", 1)[0]
                 os.environ.setdefault(k.strip(), v.strip())
 _cargar_env()
 
@@ -36,12 +37,12 @@ def cargar_kb():
     """Solo la base de conocimiento (los .md), sin el system prompt."""
     partes = ["# BASE DE CONOCIMIENTO\n"]
     for f in sorted(glob.glob(os.path.join(BASE, "knowledge-base/*.md"))):
-        partes.append(f"\n\n--- {os.path.basename(f)} ---\n" + open(f).read())
+        partes.append(f"\n\n--- {os.path.basename(f)} ---\n" + open(f, encoding="utf-8").read())
     return "".join(partes)
 
 def cargar_conocimiento():
     """System prompt + toda la base de conocimiento como contexto del modelo."""
-    return open(os.path.join(BASE, "src/prompt/system-prompt.md")).read() + "\n\n" + cargar_kb()
+    return open(os.path.join(BASE, "src/prompt/system-prompt.md"), encoding="utf-8").read() + "\n\n" + cargar_kb()
 
 KB_TEXT = cargar_kb()
 SYSTEM = cargar_conocimiento()

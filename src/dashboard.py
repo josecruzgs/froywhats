@@ -1344,5 +1344,5 @@ initRol();
 </script></body></html>"""
 
 if __name__ == "__main__":
-    print("Dashboard en http://localhost:8080")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    print("Dashboard en http://localhost:3000")
+    app.run(host="0.0.0.0", port=3000, debug=False)
