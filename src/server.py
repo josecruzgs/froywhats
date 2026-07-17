@@ -48,6 +48,18 @@ def _db():
         datos TEXT NOT NULL,
         actualizado_en TEXT NOT NULL
     )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS contactos (
+        numero TEXT PRIMARY KEY,
+        nombre TEXT,
+        ciudad TEXT,
+        colonia TEXT,
+        tema TEXT,
+        postura TEXT,
+        canal TEXT,
+        mensajes INTEGER NOT NULL DEFAULT 0,
+        primera_vez TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+    )""")
     con.execute("PRAGMA journal_mode=WAL")
     return con
 
@@ -66,6 +78,49 @@ def guardar_historial(numero, hist):
             "INSERT INTO historial (numero, datos, actualizado_en) VALUES (?,?,?) "
             "ON CONFLICT(numero) DO UPDATE SET datos=excluded.datos, actualizado_en=excluded.actualizado_en",
             (numero, json.dumps(hist, ensure_ascii=False), datetime.datetime.utcnow().isoformat()))
+        con.commit()
+    finally:
+        con.close()
+
+def cargar_contacto(numero):
+    """Perfil ya conocido de este número (nombre/ciudad/colonia), para dárselo de contexto al agente."""
+    con = _db()
+    try:
+        row = con.execute(
+            "SELECT nombre, ciudad, colonia, tema, postura, mensajes FROM contactos WHERE numero=?",
+            (numero,)).fetchone()
+        if not row:
+            return None
+        return {"nombre": row[0], "ciudad": row[1], "colonia": row[2],
+                "tema": row[3], "postura": row[4], "mensajes": row[5]}
+    finally:
+        con.close()
+
+def actualizar_contacto(numero, meta, canal):
+    """Guarda/actualiza el perfil del contacto con lo nuevo de este mensaje, sin perder
+    lo que ya se sabía si este mensaje no lo repite."""
+    meta = meta or {}
+    con = _db()
+    try:
+        prev = con.execute(
+            "SELECT nombre, ciudad, colonia, tema, postura, mensajes, primera_vez FROM contactos WHERE numero=?",
+            (numero,)).fetchone()
+        nombre = meta.get("nombre") or (prev[0] if prev else None)
+        ciudad = meta.get("municipio") or (prev[1] if prev else None)
+        colonia = meta.get("colonia") or (prev[2] if prev else None)
+        tema = meta.get("tema") or (prev[3] if prev else None)
+        postura = meta.get("postura") or (prev[4] if prev else None)
+        mensajes = (prev[5] if prev else 0) + 1
+        primera_vez = prev[6] if prev else datetime.datetime.utcnow().isoformat()
+        ahora = datetime.datetime.utcnow().isoformat()
+        con.execute("""
+            INSERT INTO contactos (numero,nombre,ciudad,colonia,tema,postura,canal,mensajes,primera_vez,actualizado_en)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(numero) DO UPDATE SET
+                nombre=excluded.nombre, ciudad=excluded.ciudad, colonia=excluded.colonia,
+                tema=excluded.tema, postura=excluded.postura, canal=excluded.canal,
+                mensajes=excluded.mensajes, actualizado_en=excluded.actualizado_en
+        """, (numero, nombre, ciudad, colonia, tema, postura, canal, mensajes, primera_vez, ahora))
         con.commit()
     finally:
         con.close()
@@ -182,11 +237,13 @@ def procesar(numero, message_id, texto=None, audio_media_id=None):
                 enviar_whatsapp(numero, MENSAJE_AUDIO_FALLIDO)
                 return
         hist = cargar_historial(numero)
+        contacto = cargar_contacto(numero)
         t0 = time.time()
-        salida = agente.responder(texto, hist)
+        salida = agente.responder(texto, hist, contacto=contacto)
         pensado = time.time() - t0  # ya se mostró 'escribiendo…' este rato
         responder_humano(numero, message_id, texto, salida, ya_pensado=pensado)
         guardar_registro(numero, texto, salida)
+        actualizar_contacto(numero, salida.get("meta"), "whatsapp")
         hist += [{"role": "user", "content": texto},
                  {"role": "assistant", "content": salida.get("respuesta", "")}]
         guardar_historial(numero, hist[-12:])
@@ -241,7 +298,8 @@ def procesar_green(chat_id, numero, mensaje):
         else:
             texto = mensaje["texto"]
         hist = cargar_historial(numero)
-        salida = agente.responder(texto, hist)
+        contacto = cargar_contacto(numero)
+        salida = agente.responder(texto, hist, contacto=contacto)
         respuesta = salida.get("respuesta", "")
         globos = humanizar.dividir_en_globos(respuesta)
         for i, g in enumerate(globos):
@@ -251,6 +309,7 @@ def procesar_green(chat_id, numero, mensaje):
             if HUMANIZAR and i < len(globos) - 1:
                 time.sleep(humanizar.pausa_entre_globos())
         guardar_registro(numero, texto, salida, origen=origen)
+        actualizar_contacto(numero, salida.get("meta"), origen)
         hist += [{"role": "user", "content": texto},
                  {"role": "assistant", "content": respuesta}]
         guardar_historial(numero, hist[-12:])

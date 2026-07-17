@@ -68,10 +68,32 @@ def _json_de(texto):
     except json.JSONDecodeError:
         return {"respuesta": texto, "meta": {}}
 
+def _contexto_contacto(contacto):
+    """Texto corto con lo ya sabido de este número, para no volver a preguntarlo."""
+    if not contacto:
+        return None
+    partes = []
+    if contacto.get("nombre"):
+        partes.append(f"se llama {contacto['nombre']}")
+    if contacto.get("ciudad"):
+        partes.append(f"es de {contacto['ciudad']}")
+    if contacto.get("colonia"):
+        partes.append(f"colonia {contacto['colonia']}")
+    if not partes:
+        return None
+    return ("Dato ya conocido de este contacto (no se lo vuelvas a preguntar, "
+            "solo repítelo en meta si la persona lo reafirma): " + ", ".join(partes) + ".")
+
+def _system_con_contacto(contacto):
+    ctx = _contexto_contacto(contacto)
+    if not ctx:
+        return SYSTEM
+    return [{"type": "text", "text": SYSTEM}, {"type": "text", "text": ctx}]
+
 # ---------- 1) Borrador ----------
-def _borrador(historial):
+def _borrador(historial, contacto=None):
     resp = cliente.messages.create(
-        model=MODELO_BORRADOR, max_tokens=700, system=SYSTEM,
+        model=MODELO_BORRADOR, max_tokens=700, system=_system_con_contacto(contacto),
         messages=historial)
     return _json_de(_texto(resp))
 
@@ -128,13 +150,13 @@ def _critica(mensaje, borrador):
     return _json_de(_texto(resp))
 
 # ---------- 3) Refinar ----------
-def _refinar(historial, borrador, critica):
+def _refinar(historial, borrador, critica, contacto=None):
     instr = (f"Tu respuesta anterior fue:\n{borrador.get('respuesta','')}\n\n"
              f"El editor la rechazó por: {', '.join(critica.get('problemas', []))}\n"
              f"Indicación: {critica.get('sugerencia','')}\n\n"
              "Reescríbela corrigiendo eso. Devuelve el mismo formato JSON {respuesta, meta}.")
     resp = cliente.messages.create(
-        model=MODELO_BORRADOR, max_tokens=700, system=SYSTEM,
+        model=MODELO_BORRADOR, max_tokens=700, system=_system_con_contacto(contacto),
         messages=historial + [{"role": "user", "content": instr}])
     return _json_de(_texto(resp))
 
@@ -172,9 +194,9 @@ def _auditar(mensaje, borrador_malo, motivos):
         pass
 
 # ---------- Orquestación ----------
-def responder(mensaje, historial=None, verbose=False):
+def responder(mensaje, historial=None, verbose=False, contacto=None):
     historial = (historial or []) + [{"role": "user", "content": mensaje}]
-    salida = _borrador(historial)
+    salida = _borrador(historial, contacto)
     for i in range(MAX_LOOPS):
         crit = _critica(mensaje, salida)
         duros = _checar_duro(salida.get("respuesta", ""))
@@ -190,7 +212,7 @@ def responder(mensaje, historial=None, verbose=False):
             print(f"  [loop {i+1}] ok={crit.get('ok')} {crit.get('problemas','')}")
         if crit.get("ok"):
             break
-        salida = _refinar(historial, salida, crit)
+        salida = _refinar(historial, salida, crit, contacto)
     return salida
 
 if __name__ == "__main__":
