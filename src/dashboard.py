@@ -292,6 +292,7 @@ def api_conversaciones():
     reciente para la tabla) y el historial completo de esa persona para el modal."""
     q = (request.args.get("q") or "").lower().strip()
     tipo = request.args.get("tipo") or ""
+    nombres = {c["numero"]: c.get("nombre") for c in listar_contactos()}
     grupos = {}
     for r in cargar_registros():
         num = r.get("numero") or "?"
@@ -300,17 +301,19 @@ def api_conversaciones():
     for num, regs in grupos.items():
         regs.sort(key=lambda r: r.get("fecha") or "")
         if tipo or q:
+            nombre_num = (nombres.get(num) or "").lower()
             def _match(r):
                 if tipo and (r.get("tipo") or "") != tipo:
                     return False
                 blob = " ".join(str(r.get(k, "") or "") for k in
                                 ("mensaje", "respuesta", "colonia", "municipio")).lower()
-                return not q or q in blob
+                return not q or q in blob or q in nombre_num
             if not any(_match(r) for r in regs):
                 continue
         ultimo = regs[-1]
         out.append({
             "numero": num,
+            "nombre": nombres.get(num),
             "fecha": (ultimo.get("fecha") or "")[:16].replace("T", " "),
             "mensaje": ultimo.get("mensaje", ""),
             "tipo": ultimo.get("tipo"),
@@ -729,14 +732,14 @@ tailwind.config = {
 </script>
 <style>
 :root{
-  --bg:#f4f1f0;--card:#fff;--ink:#1a1210;--muted:#8f827f;--line:#efe6e4;
+  --bg:#f1f1f1;--card:#fff;--ink:#1a1210;--muted:#8f827f;--line:#efe6e4;
   --grad1:#b5261e;--grad2:#d8453b;--g1:var(--grad1);--g2:var(--grad2);
   --dark:#2a0e0c;--darker:#180706;--green:#16a34a;--amber:#ffb020;--red:#ff5d5d;
   --pillbg:#fbe6e4;--pilltext:#96201a;
   --shadow:0 10px 30px rgba(30,15,12,.07);--radius:24px;
 }
 *{box-sizing:border-box;font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif}
-body{margin:0;background:#e7e8e1;color:var(--ink)}
+body{margin:0;background:#EAEAEC;color:var(--ink)}
 .app{display:flex;min-height:calc(100vh - 40px);margin:20px;background:#fff;border-radius:28px;box-shadow:0 20px 60px rgba(20,30,20,.10);overflow:hidden}
 .side{width:240px;padding:24px 16px;display:flex;flex-direction:column;gap:3px;position:relative;background:var(--card)}
 .navgrp{font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#b4b8ab;padding:16px 14px 6px}
@@ -796,15 +799,20 @@ h1{font-size:34px;margin:0 0 4px;font-weight:800;letter-spacing:-.03em}.sub{colo
 .b{max-width:84%;padding:9px 12px;border-radius:14px;margin:7px 0;font-size:14px;line-height:1.4;white-space:pre-wrap}
 .bot{background:#f3f4fa;border-top-left-radius:3px}
 .yo{background:linear-gradient(135deg,var(--grad1),var(--grad2));color:#fff;margin-left:auto;border-top-right-radius:3px}
+.typing-dots{display:inline-flex;gap:4px;align-items:center;padding:3px 2px}
+.typing-dots span{width:6px;height:6px;border-radius:50%;background:#9a9aa4;animation:typingBounce 1.2s infinite ease-in-out}
+.typing-dots span:nth-child(2){animation-delay:.15s}
+.typing-dots span:nth-child(3){animation-delay:.3s}
+@keyframes typingBounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}
 .meta{font-size:11px;color:var(--muted);margin:2px 0 8px}
 .lnk{font-size:11px;color:#0a8;cursor:pointer}
 .row{display:flex;gap:8px}.row input{flex:1}
-input,textarea,select{width:100%;padding:12px 14px!important;border:1px solid var(--line)!important;border-radius:14px!important;font-size:14px;font-family:inherit;background:#fbfcfe;margin:0 0 10px!important;display:block}
+input,textarea,select{width:100%;padding:12px 14px!important;border:1px solid var(--line)!important;border-radius:14px!important;font-size:14px;line-height:20px!important;font-family:inherit;background:#fbfcfe;margin:0 0 10px!important;display:block;box-sizing:border-box}
 textarea{min-height:90px;resize:vertical}
 .row input,.row select{margin-bottom:0!important}
-button.b1{background:var(--dark);color:#fff;border:0;border-radius:999px;padding:12px 22px;font-weight:700;font-size:13.5px;cursor:pointer}
+button.b1{background:var(--dark);color:#fff;border:0;border-radius:999px;padding:12px 22px!important;line-height:20px!important;font-weight:700;font-size:13.5px;cursor:pointer;box-sizing:border-box}
 button.b1:hover{background:linear-gradient(135deg,var(--grad1),var(--grad2))}
-button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-weight:600;font-size:13.5px;cursor:pointer}
+button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:12px 18px!important;line-height:20px!important;font-weight:600;font-size:13.5px;cursor:pointer;box-sizing:border-box}
 button.ok{background:#19c37d;color:#fff}button.no{background:#ff5d5d;color:#fff}
 button:disabled{opacity:.4;cursor:not-allowed}
 input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
@@ -874,10 +882,37 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .modalbox.wide{width:min(640px,94vw)}
 .modalbox label{font-size:12px;font-weight:700;color:#8a93a6;display:block;margin:10px 0 3px}
 select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a93a6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:32px!important}
-/* --- tablet --- */
-@media(max-width:980px){.bento{grid-template-columns:repeat(2,1fr)}.c4{grid-column:span 2}.chatwrap{grid-template-columns:1fr}.app{flex-direction:column}
-  .side{width:auto;flex-direction:row;overflow-x:auto;align-items:center;gap:6px;position:sticky;top:0;z-index:9;background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.04)}.side>div:last-child{min-width:160px}
-  .side .navgrp{display:none}}
+.sidetoggle{display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:0;background:#f2efed;color:var(--ink);cursor:pointer;margin-bottom:14px;flex-shrink:0}
+.sidebackdrop{display:none;position:fixed;inset:0;background:rgba(20,15,12,.35);z-index:25}
+.sidebackdrop.show{display:block}
+/* --- tablet / celular: sidebar colapsado a solo íconos --- */
+@media(max-width:980px){
+  .bento{grid-template-columns:repeat(2,1fr)}.c4{grid-column:span 2}.chatwrap{grid-template-columns:1fr}
+  .side{
+    width:60px;padding:14px 8px;flex-direction:column;align-items:center;
+    position:sticky;top:0;align-self:flex-start;height:100vh;overflow:hidden;
+    z-index:30;transition:width .18s ease;
+  }
+  .side .navgrp{display:none}
+  .side .navlabel{display:none}
+  .side .logotext{display:none}
+  .side .logo{padding:6px 0 16px;justify-content:center}
+  .side .nav{justify-content:center;padding:11px 0;gap:0;width:44px}
+  .side .nav svg{margin-right:0!important}
+  .side>div:last-child{display:none}
+  .sidetoggle{display:flex}
+  .side.expanded{
+    position:fixed;left:0;top:0;width:230px;height:100vh;padding:20px 14px;
+    align-items:stretch;overflow-y:auto;box-shadow:6px 0 30px rgba(0,0,0,.22);
+  }
+  .side.expanded .navgrp{display:block}
+  .side.expanded .navlabel{display:inline}
+  .side.expanded .logotext{display:inline}
+  .side.expanded .logo{justify-content:flex-start}
+  .side.expanded .nav{justify-content:flex-start;padding:12px 16px;gap:10px;width:auto}
+  .side.expanded .nav svg{margin-right:10px!important}
+  .side.expanded>div:last-child{display:block}
+}
 /* --- teléfono --- */
 @media(max-width:640px){
   .app{margin:0;border-radius:0;min-height:100vh}
@@ -885,8 +920,6 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
   h1{font-size:20px}.sub{margin-bottom:16px}
   .bento{grid-template-columns:1fr;gap:12px}.c2,.c4{grid-column:span 1}
   .card{padding:16px;border-radius:18px}
-  .logo{display:none}
-  .nav{padding:10px 13px;font-size:14px;white-space:nowrap}
   .stat .num{font-size:28px}
   .topbar{flex-wrap:wrap;gap:10px}
   .searchbox{order:2;flex-basis:100%}
@@ -898,29 +931,31 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 }
 </style></head><body>
 <div class="app">
-  <div class="side">
-    <div class="logo"><img src="/logo.png" alt="" class="logoimg"> Dashboard · Froy </div>
+  <div class="side" id="sidebar">
+    <button class="sidetoggle" id="sidetoggle" onclick="toggleSide()" aria-label="Expandir menú"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+    <div class="logo"><img src="/logo.png" alt="" class="logoimg"> <span class="logotext">Dashboard</span></div>
     <div class="navgrp">Panel</div>
-    <button class="nav active" data-t="resumen"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Resumen</button>
-    <button class="nav" data-t="seguimiento"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="5" y="4" width="14" height="17" rx="2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="16" y2="15"/></svg>Seguimiento</button>
-    <button class="nav" data-t="redes"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M3 9v6h3l10 4V5L6 9H3z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>Redes</button>
+    <button class="nav active" data-t="resumen"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="navlabel">Resumen</span></button>
+    <button class="nav" data-t="seguimiento"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="5" y="4" width="14" height="17" rx="2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="16" y2="15"/></svg><span class="navlabel">Seguimiento</span></button>
+    <button class="nav" data-t="redes"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M3 9v6h3l10 4V5L6 9H3z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg><span class="navlabel">Redes</span></button>
     <div class="navgrp">Ciudadanía</div>
-    <button class="nav" data-t="mapa"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></svg>Mapa</button>
-    <button class="nav" data-t="tendencias"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>Tendencias</button>
-    <button class="nav" data-t="escalados"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M3 12h4l2 3h6l2-3h4"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg>Escalados</button>
-    <button class="nav" data-t="explorar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>Explorar</button>
-    <button class="nav" data-t="contactos"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 21c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="8.5" r="2.6"/><path d="M15 15.6c2.8.4 4.5 2.3 4.5 5.4"/></svg>Contactos</button>
+    <button class="nav" data-t="mapa"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/><line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/></svg><span class="navlabel">Mapa</span></button>
+    <button class="nav" data-t="tendencias"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg><span class="navlabel">Tendencias</span></button>
+    <button class="nav" data-t="escalados"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M3 12h4l2 3h6l2-3h4"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg><span class="navlabel">Escalados</span></button>
+    <button class="nav" data-t="explorar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span class="navlabel">Explorar</span></button>
+    <button class="nav" data-t="contactos"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 21c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="8.5" r="2.6"/><path d="M15 15.6c2.8.4 4.5 2.3 4.5 5.4"/></svg><span class="navlabel">Contactos</span></button>
     <div class="navgrp">Bot</div>
-    <button class="nav" data-t="pruebas"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M9 2v6L4 19a2 2 0 0 0 2 3h12a2 2 0 0 0 2-3L15 8V2"/><line x1="8" y1="2" x2="16" y2="2"/><line x1="6" y1="15" x2="18" y2="15"/></svg>Pruebas</button>
-    <button class="nav" data-t="alimentar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2V5z"/><path d="M20 5a2 2 0 0 0-2-2h-6v18h6a2 2 0 0 0 2-2V5z"/></svg>Alimentar</button>
-    <button class="nav" data-t="notas"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="12" cy="9" r="6"/><path d="M9 20h6M10 22h4M9 15h6"/></svg>Notas</button>
-    <button class="nav" data-t="auditoria"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><line x1="12" y1="3" x2="12" y2="21"/><path d="M5 7h14"/><path d="M5 7 2 13a3 3 0 0 0 6 0L5 7z"/><path d="M19 7l-3 6a3 3 0 0 0 6 0l-3-6z"/><path d="M8 21h8"/></svg>Auditoría</button>
+    <button class="nav" data-t="pruebas"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M9 2v6L4 19a2 2 0 0 0 2 3h12a2 2 0 0 0 2-3L15 8V2"/><line x1="8" y1="2" x2="16" y2="2"/><line x1="6" y1="15" x2="18" y2="15"/></svg><span class="navlabel">Pruebas</span></button>
+    <button class="nav" data-t="alimentar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2V5z"/><path d="M20 5a2 2 0 0 0-2-2h-6v18h6a2 2 0 0 0 2-2V5z"/></svg><span class="navlabel">Alimentar</span></button>
+    <button class="nav" data-t="notas"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="12" cy="9" r="6"/><path d="M9 20h6M10 22h4M9 15h6"/></svg><span class="navlabel">Notas</span></button>
+    <button class="nav" data-t="auditoria"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><line x1="12" y1="3" x2="12" y2="21"/><path d="M5 7h14"/><path d="M5 7 2 13a3 3 0 0 0 6 0L5 7z"/><path d="M19 7l-3 6a3 3 0 0 0 6 0l-3-6z"/><path d="M8 21h8"/></svg><span class="navlabel">Auditoría</span></button>
     <div class="navgrp">Admin</div>
-    <button class="nav" data-t="conexion"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Conexión</button>
-    <button class="nav" data-t="usuarios"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 21c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="8.5" r="2.6"/><path d="M15 15.6c2.8.4 4.5 2.3 4.5 5.4"/></svg>Usuarios</button>
+    <button class="nav" data-t="conexion"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span class="navlabel">Conexión</span></button>
+    <button class="nav" data-t="usuarios"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 21c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="8.5" r="2.6"/><path d="M15 15.6c2.8.4 4.5 2.3 4.5 5.4"/></svg><span class="navlabel">Usuarios</span></button>
     <div style="flex:1"></div>
     <div class="muted" style="padding:12px">Tu nombre:<br><input id="autor" placeholder="quién administra" style="margin-top:6px"></div>
   </div>
+  <div id="sidebackdrop" class="sidebackdrop" onclick="cerrarSide()"></div>
   <div class="main">
    <div class="mx-auto w-full max-w-[1300px] 2xl:max-w-[1600px]">
     <div class="topbar">
@@ -1033,8 +1068,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         </div>
         <div style="overflow-x:auto">
         <table class="ctable">
-          <thead><tr><th>Fecha</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th></tr></thead>
-          <tbody id="ex-body"><tr><td colspan="6"><span class="muted">Cargando…</span></td></tr></tbody>
+          <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th></tr></thead>
+          <tbody id="ex-body"><tr><td colspan="7"><span class="muted">Cargando…</span></td></tr></tbody>
         </table>
         </div>
         <div id="ex-pager" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px"></div>
@@ -1264,10 +1299,13 @@ document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if
 let ROL='admin';
 const LOADERS={resumen:cargarStats,seguimiento:cargarSeguimiento,mapa:cargarMapa,tendencias:cargarTendencias,escalados:cargarEscalados,redes:cargarRedes,explorar:cargarExplorar,contactos:cargarContactos,pruebas:cargarKB,alimentar:cargarPendientes,notas:cargarNotas,auditoria:cargarAuditoria,conexion:cargarConexion,usuarios:cargarUsuarios};
 const TABS=Object.keys(LOADERS);
+function toggleSide(){$('#sidebar').classList.toggle('expanded');$('#sidebackdrop').classList.toggle('show');}
+function cerrarSide(){$('#sidebar').classList.remove('expanded');$('#sidebackdrop').classList.remove('show');}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
   TABS.forEach(t=>$('#'+t).classList.toggle('hide',t!==b.dataset.t));
   try{localStorage.setItem('froy_tab',b.dataset.t);}catch(e){}
+  cerrarSide();
   (LOADERS[b.dataset.t]||function(){})();
 });
 function buscarSeccion(q){
@@ -1393,13 +1431,14 @@ function renderExplorar(){
     const msj=x.mensaje?('<span title="'+x.mensaje.replace(/"/g,'&quot;')+'">'+x.mensaje.slice(0,60)+(x.mensaje.length>60?'…':'')+'</span>'):'<span class="muted">—</span>';
     return `<tr style="cursor:pointer" onclick="abrirExplorarModal('${x.numero}')">
       <td class="muted">${x.fecha}</td>
+      <td>${x.nombre||'<span class="muted">—</span>'}</td>
       <td>${x.numero}${x.escalar?' '+ICONS.flag:''}</td>
       <td>${x.tipo?tag(x.tipo):'<span class="muted">—</span>'}</td>
       <td>${[x.colonia,x.municipio].filter(Boolean).join(', ')||'<span class="muted">—</span>'}</td>
       <td>${msj}</td>
       <td>${x.n}</td>
     </tr>`;
-  }).join(''):'<tr><td colspan="6"><span class="muted">Sin resultados</span></td></tr>';
+  }).join(''):'<tr><td colspan="7"><span class="muted">Sin resultados</span></td></tr>';
   $('#ex-pager').innerHTML=total?(
     '<button class="ghost" '+(_exPage<=1?'disabled':'')+' onclick="exIrPagina('+(_exPage-1)+')">← Anterior</button>'+
     '<span class="muted" style="padding:0 10px;font-size:13px">Página '+_exPage+' de '+totalPaginas+'</span>'+
@@ -1408,7 +1447,7 @@ function renderExplorar(){
 }
 function abrirExplorarModal(numero){
   const x=_explorarCache[numero]; if(!x)return;
-  $('#ex-modal-title').textContent='Historial · '+numero;
+  $('#ex-modal-title').textContent='Historial · '+(x.nombre?(x.nombre+' · '+numero):numero);
   const chat=$('#ex-modal-chat');
   chat.innerHTML=(x.historial||[]).map(h=>{
     let html=`<div class="muted" style="font-size:10.5px;text-align:center;margin:8px 0 2px">${h.fecha}${h.tipo?(' · '+h.tipo):''}</div>`;
@@ -1688,14 +1727,15 @@ async function initRol(){
 // chat
 let hist=[];
 function add(t,c){const d=document.createElement('div');d.className='b '+c;d.textContent=t;$('#chat').appendChild(d);$('#chat').scrollTop=1e9;return d;}
+function addTyping(){const d=document.createElement('div');d.className='b bot';d.innerHTML='<span class="typing-dots"><span></span><span></span><span></span></span>';$('#chat').appendChild(d);$('#chat').scrollTop=1e9;return d;}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function enviar(){
   const i=$('#msg'),m=i.value.trim();if(!m)return;i.value='';add(m,'yo');hist.push({role:'user',content:m});
-  const t=add('escribiendo…','bot');
+  const t=addTyping();
   const d=await(await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mensaje:m,historial:hist})})).json();
   t.remove();if(d.error){add('⚠ '+d.error,'bot');return;}
   const sim=$('#sim').checked,gl=d.globos&&d.globos.length?d.globos:[d.respuesta];
-  for(let k=0;k<gl.length;k++){if(sim){const tp=add('escribiendo…','bot');await sleep(Math.min(500+gl[k].length*40,3500));tp.remove();}add(gl[k],'bot');}
+  for(let k=0;k<gl.length;k++){if(sim){const tp=addTyping();await sleep(Math.min(500+gl[k].length*40,3500));tp.remove();}add(gl[k],'bot');}
   const mt=document.createElement('div');mt.className='meta';mt.textContent='meta: '+tag2(d.meta);$('#chat').appendChild(mt);
   const ln=document.createElement('div');ln.className='lnk';ln.innerHTML=ICONS.bulb+' anotar mejora';ln.onclick=()=>anotar(ln,m,d.respuesta);$('#chat').appendChild(ln);
   hist.push({role:'assistant',content:d.respuesta});$('#chat').scrollTop=1e9;
