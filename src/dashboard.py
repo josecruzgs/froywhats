@@ -739,7 +739,7 @@ tailwind.config = {
   --shadow:0 10px 30px rgba(30,15,12,.07);--radius:24px;
 }
 *{box-sizing:border-box;font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif}
-body{margin:0;background:#EAEAEC;color:var(--ink)}
+body{margin:0;background:#EAEAEC;color:var(--ink);overflow-x:hidden}
 .app{display:flex;min-height:calc(100vh - 40px);margin:20px;background:#fff;border-radius:28px;box-shadow:0 20px 60px rgba(20,30,20,.10);overflow:hidden}
 .side{width:240px;padding:24px 16px;display:flex;flex-direction:column;gap:3px;position:relative;background:var(--card)}
 .navgrp{font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#b4b8ab;padding:16px 14px 6px}
@@ -783,6 +783,7 @@ h1{font-size:34px;margin:0 0 4px;font-weight:800;letter-spacing:-.03em}.sub{colo
 .tag{font-size:11px;padding:2px 8px;border-radius:20px;background:#eef;color:#55c;font-weight:700}
 .tag.q{background:#fdeaea;color:#d44}.tag.s{background:#fff3e0;color:#c80}.tag.a{background:#e8f8f0;color:#0a8}
 /* tabla de contactos */
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
 .ctable{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
 .ctable th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;padding:8px 12px;border-bottom:1px solid var(--line)}
 .ctable td{padding:10px 12px;border-bottom:1px solid var(--line)}
@@ -1050,7 +1051,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         <button class="subtab" data-esc="resuelto" onclick="cambiarEscTab('resuelto')">Resueltas</button>
       </div>
       <div class="card c4">
-        <div style="overflow-x:auto">
+        <div class="tablewrap">
         <table class="ctable">
           <thead><tr><th>Fecha</th><th>Número</th><th>Ubicación</th><th>Tema</th><th>Msjs</th></tr></thead>
           <tbody id="esc-body"><tr><td colspan="5"><span class="muted">Cargando…</span></td></tr></tbody>
@@ -1069,7 +1070,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <button class="ghost" onclick="cargarExplorar()">Buscar</button>
           <a class="b1" href="/export.csv" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:11px 16px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><polyline points="7 11 12 16 17 11"/><path d="M4 20h16"/></svg>Exportar CSV</a>
         </div>
-        <div style="overflow-x:auto">
+        <div class="tablewrap">
         <table class="ctable">
           <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th></tr></thead>
           <tbody id="ex-body"><tr><td colspan="7"><span class="muted">Cargando…</span></td></tr></tbody>
@@ -1094,7 +1095,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </select>
           <button class="ghost" onclick="cargarContactos()">Buscar</button>
         </div>
-        <div style="overflow-x:auto">
+        <div class="tablewrap">
         <table class="ctable">
           <thead><tr><th>Número</th><th>Nombre</th><th>Ciudad</th><th>Colonia</th><th>Tema</th><th>Postura</th><th>Msjs</th><th>Última actividad</th></tr></thead>
           <tbody id="ct-body"><tr><td colspan="8"><span class="muted">Cargando…</span></td></tr></tbody>
