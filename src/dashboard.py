@@ -885,14 +885,17 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .sidetoggle{display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:0;background:#f2efed;color:var(--ink);cursor:pointer;margin-bottom:14px;flex-shrink:0}
 .sidebackdrop{display:none;position:fixed;inset:0;background:rgba(20,15,12,.35);z-index:25}
 .sidebackdrop.show{display:block}
-/* --- tablet / celular: sidebar colapsado a solo íconos --- */
+/* --- tablet / celular: sidebar fijo (100vh siempre, sin importar el contenido de la página) --- */
 @media(max-width:980px){
+  .app{margin:0;border-radius:0;min-height:100vh;display:block}
   .bento{grid-template-columns:repeat(2,1fr)}.c4{grid-column:span 2}.chatwrap{grid-template-columns:1fr}
   .side{
-    width:60px;padding:14px 8px;flex-direction:column;align-items:center;
-    position:sticky;top:0;align-self:flex-start;height:100vh;overflow:hidden;
-    z-index:30;transition:width .18s ease;
+    position:fixed;left:0;top:0;width:60px;height:100vh;
+    padding:14px 8px;flex-direction:column;align-items:center;
+    overflow-y:auto;overflow-x:hidden;scrollbar-width:none;
+    z-index:30;transition:width .18s ease;box-shadow:2px 0 10px rgba(0,0,0,.05);
   }
+  .side::-webkit-scrollbar{display:none}
   .side .navgrp{display:none}
   .side .navlabel{display:none}
   .side .logotext{display:none}
@@ -901,9 +904,10 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
   .side .nav svg{margin-right:0!important}
   .side>div:last-child{display:none}
   .sidetoggle{display:flex}
+  .main{margin-left:60px}
   .side.expanded{
-    position:fixed;left:0;top:0;width:230px;height:100vh;padding:20px 14px;
-    align-items:stretch;overflow-y:auto;box-shadow:6px 0 30px rgba(0,0,0,.22);
+    width:230px;padding:20px 14px;
+    align-items:stretch;box-shadow:6px 0 30px rgba(0,0,0,.22);
   }
   .side.expanded .navgrp{display:block}
   .side.expanded .navlabel{display:inline}
@@ -915,7 +919,6 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 }
 /* --- teléfono --- */
 @media(max-width:640px){
-  .app{margin:0;border-radius:0;min-height:100vh}
   .main{padding:16px 13px 60px}
   h1{font-size:20px}.sub{margin-bottom:16px}
   .bento{grid-template-columns:1fr;gap:12px}.c2,.c4{grid-column:span 1}
