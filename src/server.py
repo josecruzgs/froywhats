@@ -9,7 +9,7 @@ Servidor webhook de WhatsApp para el agente de Froy.
 Correr:  python src/server.py   (escucha en el puerto 8000)
 Requiere en .env: ANTHROPIC_API_KEY, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN
 """
-import os, json, sys, time, datetime, threading
+import os, json, sys, time, datetime, threading, tempfile, sqlite3
 import requests
 from flask import Flask, request
 
@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agente      # carga .env, system prompt y base de conocimiento
 import humanizar   # ritmo humano: lectura, escritura por globos, pausas
 import green_api   # WhatsApp vía Green API (no oficial, por QR)
+import transcribir_audio  # transcripción de notas de voz (faster-whisper, CPU)
+
+MENSAJE_AUDIO_FALLIDO = "no pude escuchar bien tu audio 🙏 ¿me lo puedes escribir?"
 
 HUMANIZAR = os.environ.get("HUMANIZAR", "1") != "0"
 _vistos = set()    # ids de mensajes ya procesados (evita duplicados por reintentos de Meta)
@@ -33,8 +36,39 @@ REGISTROS = os.path.join(DATA, "registros.jsonl")
 
 app = Flask(__name__)
 
-# Historial corto por número (en memoria; para producción usar una base de datos).
-historiales = {}
+# Historial corto por número, persistido en SQLite (no en memoria: gunicorn corre
+# varios workers como procesos separados, y un dict en memoria no se comparte entre
+# ellos ni sobrevive a un restart).
+CONV_DB = os.path.join(DATA, "conversaciones.db")
+
+def _db():
+    con = sqlite3.connect(CONV_DB, timeout=10)
+    con.execute("""CREATE TABLE IF NOT EXISTS historial (
+        numero TEXT PRIMARY KEY,
+        datos TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+    )""")
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+def cargar_historial(numero):
+    con = _db()
+    try:
+        row = con.execute("SELECT datos FROM historial WHERE numero=?", (numero,)).fetchone()
+        return json.loads(row[0]) if row else []
+    finally:
+        con.close()
+
+def guardar_historial(numero, hist):
+    con = _db()
+    try:
+        con.execute(
+            "INSERT INTO historial (numero, datos, actualizado_en) VALUES (?,?,?) "
+            "ON CONFLICT(numero) DO UPDATE SET datos=excluded.datos, actualizado_en=excluded.actualizado_en",
+            (numero, json.dumps(hist, ensure_ascii=False), datetime.datetime.utcnow().isoformat()))
+        con.commit()
+    finally:
+        con.close()
 
 def _post(payload):
     return requests.post(GRAPH_URL,
@@ -57,6 +91,34 @@ def leido_y_escribiendo(message_id):
                "message_id": message_id, "typing_indicator": {"type": "text"}})
     except Exception as e:
         print("typing indicator no disponible:", e, flush=True)
+
+def _transcribir_desde_url(url, headers=None):
+    """Descarga un audio de una URL y lo transcribe. Lanza excepción si algo falla."""
+    r = requests.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    mime = r.headers.get("Content-Type", "")
+    ext = ".ogg"
+    for candidato in (".mp3", ".m4a", ".wav", ".amr", ".aac", ".flac", ".webm"):
+        if candidato.strip(".") in mime:
+            ext = candidato
+            break
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    try:
+        tmp.write(r.content)
+        tmp.close()
+        return transcribir_audio.transcribir(tmp.name)
+    finally:
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+
+def _descargar_media_meta(media_id):
+    """Resuelve un media_id de WhatsApp Cloud API a su URL temporal de descarga."""
+    r = requests.get(f"https://graph.facebook.com/v21.0/{media_id}",
+                      headers={"Authorization": f"Bearer {TOKEN}"}, timeout=15)
+    r.raise_for_status()
+    return r.json()["url"]
 
 def responder_humano(numero, message_id, texto, salida, ya_pensado=0.0):
     """Reproduce el ritmo humano: leer -> escribir globo -> pausa -> siguiente globo.
@@ -104,12 +166,22 @@ def verificar():
         return request.args.get("hub.challenge", ""), 200
     return "Verificación fallida", 403
 
-def procesar(numero, message_id, texto):
+def procesar(numero, message_id, texto=None, audio_media_id=None):
     """Hace todo el trabajo pesado (agente + ritmo humano + envío). Corre en un hilo
     aparte para que el webhook le responda a Meta de inmediato."""
     try:
         leido_y_escribiendo(message_id)  # palomita azul + 'escribiendo…' mientras piensa
-        hist = historiales.get(numero, [])
+        if audio_media_id and not texto:
+            try:
+                media_url = _descargar_media_meta(audio_media_id)
+                texto = _transcribir_desde_url(media_url, headers={"Authorization": f"Bearer {TOKEN}"})
+            except Exception as e:
+                print("Error transcribiendo audio Meta:", e, flush=True)
+                texto = None
+            if not texto or not texto.strip():
+                enviar_whatsapp(numero, MENSAJE_AUDIO_FALLIDO)
+                return
+        hist = cargar_historial(numero)
         t0 = time.time()
         salida = agente.responder(texto, hist)
         pensado = time.time() - t0  # ya se mostró 'escribiendo…' este rato
@@ -117,7 +189,7 @@ def procesar(numero, message_id, texto):
         guardar_registro(numero, texto, salida)
         hist += [{"role": "user", "content": texto},
                  {"role": "assistant", "content": salida.get("respuesta", "")}]
-        historiales[numero] = hist[-12:]
+        guardar_historial(numero, hist[-12:])
     except Exception as e:
         print("Error procesando mensaje:", e, flush=True)
 
@@ -128,7 +200,8 @@ def recibir():
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
                 for msg in change.get("value", {}).get("messages", []):
-                    if msg.get("type") != "text":
+                    tipo_msg = msg.get("type")
+                    if tipo_msg not in ("text", "audio"):
                         continue
                     mid = msg["id"]
                     if mid in _vistos:      # reintento de Meta -> ya lo procesamos
@@ -137,8 +210,13 @@ def recibir():
                     if len(_vistos) > 5000:
                         _vistos.clear()
                     # procesar en segundo plano y devolver 200 ya mismo
-                    threading.Thread(target=procesar,
-                        args=(msg["from"], mid, msg["text"]["body"]), daemon=True).start()
+                    if tipo_msg == "text":
+                        threading.Thread(target=procesar,
+                            args=(msg["from"], mid, msg["text"]["body"]), daemon=True).start()
+                    else:  # audio
+                        threading.Thread(target=procesar,
+                            args=(msg["from"], mid), kwargs={"audio_media_id": msg["audio"]["id"]},
+                            daemon=True).start()
     except Exception as e:
         print("Error procesando webhook:", e, flush=True)
     return "OK", 200  # responder rápido para que Meta no reintente
@@ -146,10 +224,23 @@ def recibir():
 # ---------- Green API (WhatsApp no oficial por QR) ----------
 _green_vistos = set()
 
-def procesar_green(chat_id, numero, texto):
+def procesar_green(chat_id, numero, mensaje):
     """Trabajo pesado para un mensaje de Green API (agente + ritmo humano + envío)."""
     try:
-        hist = historiales.get(numero, [])
+        origen = "green"
+        if mensaje["tipo"] == "audio":
+            try:
+                texto = _transcribir_desde_url(mensaje["url"])
+            except Exception as e:
+                print("Error transcribiendo audio Green:", e, flush=True)
+                texto = None
+            if not texto or not texto.strip():
+                green_api.enviar(chat_id, MENSAJE_AUDIO_FALLIDO)
+                return
+            origen = "green-audio"
+        else:
+            texto = mensaje["texto"]
+        hist = cargar_historial(numero)
         salida = agente.responder(texto, hist)
         respuesta = salida.get("respuesta", "")
         globos = humanizar.dividir_en_globos(respuesta)
@@ -159,10 +250,10 @@ def procesar_green(chat_id, numero, texto):
             green_api.enviar(chat_id, g)
             if HUMANIZAR and i < len(globos) - 1:
                 time.sleep(humanizar.pausa_entre_globos())
-        guardar_registro(numero, texto, salida, origen="green")
+        guardar_registro(numero, texto, salida, origen=origen)
         hist += [{"role": "user", "content": texto},
                  {"role": "assistant", "content": respuesta}]
-        historiales[numero] = hist[-12:]
+        guardar_historial(numero, hist[-12:])
     except Exception as e:
         print("Error procesando mensaje Green:", e, flush=True)
 
@@ -172,14 +263,14 @@ def green_webhook():
     try:
         p = green_api.parse_incoming(data)
         if p:
-            chat, numero, texto = p
-            mid = data.get("idMessage") or (chat + "|" + texto)
+            chat, numero, mensaje = p
+            mid = data.get("idMessage") or (chat + "|" + json.dumps(mensaje, sort_keys=True))
             if mid not in _green_vistos:
                 _green_vistos.add(mid)
                 if len(_green_vistos) > 5000:
                     _green_vistos.clear()
                 threading.Thread(target=procesar_green,
-                                 args=(chat, numero, texto), daemon=True).start()
+                                 args=(chat, numero, mensaje), daemon=True).start()
     except Exception as e:
         print("Error webhook Green:", e, flush=True)
     return "OK", 200

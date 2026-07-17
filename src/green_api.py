@@ -65,21 +65,31 @@ def enviar(chat_id, texto):
         return False
 
 def parse_incoming(data):
-    """Extrae (chatId, numero, texto) de una notificación de Green API, o None."""
+    """Extrae (chatId, numero, mensaje) de una notificación de Green API, o None.
+    `mensaje` es {"tipo": "texto", "texto": ...} o {"tipo": "audio", "url": ..., "mime": ...}."""
     if data.get("typeWebhook") != "incomingMessageReceived":
         return None
     md = data.get("messageData", {})
     tipo = md.get("typeMessage")
     if tipo == "textMessage":
-        texto = md.get("textMessageData", {}).get("textMessage", "")
+        mensaje = {"tipo": "texto", "texto": md.get("textMessageData", {}).get("textMessage", "")}
+        if not mensaje["texto"]:
+            return None
     elif tipo == "extendedTextMessage":
-        texto = md.get("extendedTextMessageData", {}).get("text", "")
+        mensaje = {"tipo": "texto", "texto": md.get("extendedTextMessageData", {}).get("text", "")}
+        if not mensaje["texto"]:
+            return None
+    elif tipo in ("audioMessage", "pttMessage"):
+        fmd = md.get("fileMessageData", {})
+        mensaje = {"tipo": "audio", "url": fmd.get("downloadUrl", ""), "mime": fmd.get("mimeType", "")}
+        if not mensaje["url"]:
+            return None
     else:
         return None
     chat = data.get("senderData", {}).get("chatId", "")
-    if not chat or not texto:
+    if not chat:
         return None
     # solo chats individuales (ignora grupos @g.us)
     if not chat.endswith("@c.us"):
         return None
-    return chat, chat.split("@")[0], texto
+    return chat, chat.split("@")[0], mensaje

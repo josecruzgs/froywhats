@@ -105,8 +105,8 @@ journalctl -u froy-dashboard -f
 # Reiniciar tras un cambio de código o de la base de conocimiento
 systemctl restart froy-webhook froy-dashboard
 
-# Actualizar el proyecto (tras subir cambios)
-cd /opt/froy && systemctl restart froy-webhook froy-dashboard
+# Actualizar el proyecto (tras subir cambios a git)
+cd /opt/froy && git pull && systemctl restart froy-webhook froy-dashboard
 ```
 
 ## Notas
