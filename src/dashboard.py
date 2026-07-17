@@ -99,6 +99,15 @@ def _solo_admin():
 def api_me():
     return jsonify({"usuario": getattr(g, "usuario", ""), "rol": getattr(g, "rol", "")})
 
+@app.post("/api/verificar-password")
+def api_verificar_password():
+    """Reconfirma la contraseña del usuario ya logueado (para desbloquear acciones sensibles)."""
+    if not PANEL_PASS:  # sin protección configurada (solo local)
+        return jsonify({"ok": True})
+    clave = (request.get_json(force=True) or {}).get("clave", "")
+    rol = _validar(getattr(g, "usuario", ""), clave)
+    return jsonify({"ok": rol is not None})
+
 # ---------- API: conexión Green API (solo admin) ----------
 @app.get("/api/green-config")
 def api_green_config_get():
@@ -165,12 +174,6 @@ def api_stats():
         "top_colonias": cols.most_common(8),
         "notas": len(notas),
         "aportes_pendientes": len(pend),
-        "recientes": [
-            {"mensaje": r.get("mensaje", ""), "tipo": r.get("tipo"),
-             "municipio": r.get("municipio"), "colonia": r.get("colonia"),
-             "escalar": r.get("escalar"), "fecha": r.get("fecha", "")[:16].replace("T", " ")}
-            for r in regs[-8:][::-1]
-        ],
     })
 
 # ---------- API: temas frecuentes y tendencias ----------
@@ -285,22 +288,43 @@ def api_escalados_atender():
 # ---------- API: explorar y exportar ----------
 @app.get("/api/conversaciones")
 def api_conversaciones():
+    """Conversaciones agrupadas por número: una fila por usuario (con su mensaje más
+    reciente para la tabla) y el historial completo de esa persona para el modal."""
     q = (request.args.get("q") or "").lower().strip()
     tipo = request.args.get("tipo") or ""
+    grupos = {}
+    for r in cargar_registros():
+        num = r.get("numero") or "?"
+        grupos.setdefault(num, []).append(r)
     out = []
-    for i, r in enumerate(cargar_registros()):
-        if tipo and (r.get("tipo") or "") != tipo:
-            continue
-        blob = " ".join(str(r.get(k, "") or "") for k in
-                        ("mensaje", "respuesta", "colonia", "municipio")).lower()
-        if q and q not in blob:
-            continue
-        out.append({"id": i, "fecha": (r.get("fecha") or "")[:16].replace("T", " "),
-                    "mensaje": r.get("mensaje", ""), "respuesta": r.get("respuesta", ""),
-                    "tipo": r.get("tipo"), "municipio": r.get("municipio"),
-                    "colonia": r.get("colonia"), "escalar": r.get("escalar"),
-                    "origen": r.get("origen")})
-    return jsonify({"total": len(out), "items": out[-200:][::-1]})
+    for num, regs in grupos.items():
+        regs.sort(key=lambda r: r.get("fecha") or "")
+        if tipo or q:
+            def _match(r):
+                if tipo and (r.get("tipo") or "") != tipo:
+                    return False
+                blob = " ".join(str(r.get(k, "") or "") for k in
+                                ("mensaje", "respuesta", "colonia", "municipio")).lower()
+                return not q or q in blob
+            if not any(_match(r) for r in regs):
+                continue
+        ultimo = regs[-1]
+        out.append({
+            "numero": num,
+            "fecha": (ultimo.get("fecha") or "")[:16].replace("T", " "),
+            "mensaje": ultimo.get("mensaje", ""),
+            "tipo": ultimo.get("tipo"),
+            "municipio": ultimo.get("municipio"),
+            "colonia": ultimo.get("colonia"),
+            "escalar": any(r.get("escalar") for r in regs),
+            "origen": ultimo.get("origen"),
+            "n": len(regs),
+            "historial": [{"fecha": (r.get("fecha") or "")[:16].replace("T", " "),
+                           "mensaje": r.get("mensaje", ""), "respuesta": r.get("respuesta", ""),
+                           "tipo": r.get("tipo")} for r in regs],
+        })
+    out.sort(key=lambda x: x["fecha"], reverse=True)
+    return jsonify({"total": len(out), "items": out})
 
 @app.get("/api/contactos")
 def api_contactos():
@@ -685,7 +709,7 @@ def home():
 
 PAGINA = r"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dashboard — Agente de Froy</title>
+<title>Agente Froy</title>
 <link rel="icon" type="image/png" href="/logo.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -783,6 +807,7 @@ button.b1:hover{background:linear-gradient(135deg,var(--grad1),var(--grad2))}
 button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-weight:600;font-size:13.5px;cursor:pointer}
 button.ok{background:#19c37d;color:#fff}button.no{background:#ff5d5d;color:#fff}
 button:disabled{opacity:.4;cursor:not-allowed}
+input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .subtabs{display:flex;gap:8px;margin-bottom:14px}
 .subtab{background:#fff;border:1px solid var(--line);border-radius:999px;padding:9px 18px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer}
 .subtab.active{background:var(--ink);color:#fff;border-color:var(--ink)}
@@ -808,8 +833,6 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .vbars .d{font-size:10px;color:var(--muted);font-weight:600}.vbars .v{font-size:10px;font-weight:700;color:var(--grad1)}
 #mapa-canvas{height:62vh;border-radius:16px;z-index:1}
 .aporte.done{opacity:.55}
-.conv{border-bottom:1px solid var(--line);padding:10px 0;font-size:13px}
-.conv>div{margin:2px 0}
 .barbusq{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.barbusq input{flex:1;min-width:160px}.barbusq select{width:auto}
 #kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;align-items:start}
 .kcol{background:#f4f6fb;border-radius:14px;padding:10px;min-height:120px;transition:.12s}
@@ -848,8 +871,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .modal{position:fixed;inset:0;background:rgba(20,26,45,.45);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
 .modal.hide{display:none}
 .modalbox{background:#fff;border-radius:20px;padding:22px;width:min(480px,94vw);max-height:92vh;overflow:auto;box-shadow:0 30px 60px rgba(0,0,0,.3)}
+.modalbox.wide{width:min(640px,94vw)}
 .modalbox label{font-size:12px;font-weight:700;color:#8a93a6;display:block;margin:10px 0 3px}
-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a93a6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:28px}
+select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a93a6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:32px!important}
 /* --- tablet --- */
 @media(max-width:980px){.bento{grid-template-columns:repeat(2,1fr)}.c4{grid-column:span 2}.chatwrap{grid-template-columns:1fr}.app{flex-direction:column}
   .side{width:auto;flex-direction:row;overflow-x:auto;align-items:center;gap:6px;position:sticky;top:0;z-index:9;background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.04)}.side>div:last-child{min-width:160px}
@@ -875,7 +899,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 </style></head><body>
 <div class="app">
   <div class="side">
-    <div class="logo"><img src="/logo.png" alt="" class="logoimg"> Froy · Panel</div>
+    <div class="logo"><img src="/logo.png" alt="" class="logoimg"> Dashboard · Froy </div>
     <div class="navgrp">Panel</div>
     <button class="nav active" data-t="resumen"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Resumen</button>
     <button class="nav" data-t="seguimiento"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-2 align-[-4px] shrink-0"><rect x="5" y="4" width="14" height="17" rx="2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="16" y2="15"/></svg>Seguimiento</button>
@@ -917,7 +941,6 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           </div></div>
         <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M12 21s7-6.5 7-12a7 7 0 0 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="9" r="2.3"/></svg>Top municipios</div><div id="munis"></div></div>
         <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><rect x="4" y="3" width="10" height="18"/><rect x="15" y="9" width="6" height="12"/></svg>Top colonias</div><div id="cols"></div></div>
-        <div class="card c4"><div class="h">Últimas conversaciones</div><div id="recientes"></div></div>
       </div>
     </section>
 
@@ -1000,15 +1023,21 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
     <!-- EXPLORAR -->
     <section id="explorar" class="hide">
-      <h1>Explorar conversaciones</h1><div class="sub">Busca, filtra y exporta <span class="tag" id="ex-count"></span></div>
+      <h1>Explorar conversaciones</h1><div class="sub">Agrupado por usuario — busca, filtra y exporta <span class="tag" id="ex-count"></span></div>
       <div class="card c4">
         <div class="barbusq">
-          <input id="ex-q" placeholder="Buscar en mensajes, colonia, municipio…">
-          <select id="ex-tipo"><option value="">Todos los tipos</option><option>apoyo</option><option>personaje</option><option>4t</option><option>solicitud</option><option>queja</option><option>otro</option></select>
+          <input id="ex-q" placeholder="Buscar en mensajes, colonia, municipio…" onkeydown="if(event.key==='Enter')cargarExplorar()">
+          <select id="ex-tipo" onchange="cargarExplorar()"><option value="">Todos los tipos</option><option>apoyo</option><option>personaje</option><option>4t</option><option>solicitud</option><option>queja</option><option>otro</option></select>
           <button class="ghost" onclick="cargarExplorar()">Buscar</button>
-          <a class="b1" href="/export.csv" style="text-decoration:none;display:inline-block;padding:11px 16px;border-radius:12px">⬇ Exportar CSV</a>
+          <a class="b1" href="/export.csv" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:11px 16px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><polyline points="7 11 12 16 17 11"/><path d="M4 20h16"/></svg>Exportar CSV</a>
         </div>
-        <div id="ex-list"><span class="muted">Cargando…</span></div>
+        <div style="overflow-x:auto">
+        <table class="ctable">
+          <thead><tr><th>Fecha</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th></tr></thead>
+          <tbody id="ex-body"><tr><td colspan="6"><span class="muted">Cargando…</span></td></tr></tbody>
+        </table>
+        </div>
+        <div id="ex-pager" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px"></div>
       </div>
     </section>
 
@@ -1086,13 +1115,17 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <div class="bento">
         <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Credenciales de Green API</div>
           <p class="muted" style="font-size:13px">Sácalas de tu consola de <b>green-api.com</b> (idInstance y apiTokenInstance).</p>
+          <div id="g-bloqueo" style="background:#f7f5f3;border-radius:12px;padding:12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font-size:13px;color:#4a423d;display:flex;align-items:center;gap:6px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Campos bloqueados para evitar cambios por error.</span>
+            <button class="ghost" onclick="pedirPasswordGreen()">Ingresar nueva conexión</button>
+          </div>
           <label style="font-size:12px;font-weight:700;color:#8a93a6">idInstance</label>
-          <input id="g-id" placeholder="Ej. 1101000001">
+          <input id="g-id" placeholder="Ej. 1101000001" disabled>
           <label style="font-size:12px;font-weight:700;color:#8a93a6">apiTokenInstance</label>
-          <input id="g-token" placeholder="Ej. abcdef123456...">
+          <input id="g-token" placeholder="Ej. abcdef123456..." disabled>
           <label style="font-size:12px;font-weight:700;color:#8a93a6">apiUrl (déjalo así si no sabes)</label>
-          <input id="g-url" placeholder="https://api.green-api.com">
-          <div style="display:flex;gap:8px;margin-top:10px"><button class="b1" onclick="guardarGreen()">Guardar</button><button class="ghost" onclick="probarGreen()">Probar conexión</button></div>
+          <input id="g-url" placeholder="https://api.green-api.com" disabled>
+          <div style="display:flex;gap:8px;margin-top:10px"><button class="b1" id="g-guardar-btn" onclick="guardarGreen()" disabled>Guardar</button><button class="ghost" onclick="probarGreen()">Probar conexión</button></div>
           <div class="flash" id="g-flash"></div>
         </div>
         <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><line x1="4" y1="20" x2="4" y2="14"/><line x1="10" y1="20" x2="10" y2="10"/><line x1="16" y1="20" x2="16" y2="6"/><line x1="22" y1="20" x2="22" y2="3"/></svg>Estado y webhook</div>
@@ -1163,6 +1196,22 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
     </div>
   </div>
 </div>
+<div id="exmodal" class="modal hide">
+  <div class="modalbox wide">
+    <div class="h" style="font-size:16px;margin-bottom:4px" id="ex-modal-title">Historial de conversación</div>
+    <div class="chat" id="ex-modal-chat" style="height:50vh"></div>
+    <div style="margin-top:14px"><button class="ghost" onclick="cerrarExplorarModal()">Cerrar</button></div>
+  </div>
+</div>
+<div id="pwmodal" class="modal hide">
+  <div class="modalbox">
+    <div class="h" style="font-size:16px;margin-bottom:4px">Confirma tu contraseña</div>
+    <p class="muted" style="font-size:13px;margin-top:0">Para desbloquear la edición de la conexión de WhatsApp, confirma tu contraseña.</p>
+    <input type="password" id="pw-input" placeholder="Tu contraseña" onkeydown="if(event.key==='Enter')confirmarPasswordGreen()">
+    <div class="flash" id="pw-flash"></div>
+    <div style="margin-top:14px;display:flex;gap:8px"><button class="b1" onclick="confirmarPasswordGreen()">Confirmar</button><button class="ghost" onclick="cerrarPasswordModal()">Cancelar</button></div>
+  </div>
+</div>
 <script>
 function svg(inner,size){size=size||16;return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block align-[-3px]">${inner}</svg>`;}
 const ICONS={
@@ -1211,6 +1260,7 @@ const ICONS={
 };
 const COLICONS={porhacer:ICONS.pin,proceso:ICONS.clock,hecho:ICONS.check,evidencia:ICONS.camera};
 const $=s=>document.querySelector(s), autor=()=>document.querySelector('#autor').value||'anónimo';
+document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.add('hide');}));
 let ROL='admin';
 const LOADERS={resumen:cargarStats,seguimiento:cargarSeguimiento,mapa:cargarMapa,tendencias:cargarTendencias,escalados:cargarEscalados,redes:cargarRedes,explorar:cargarExplorar,contactos:cargarContactos,pruebas:cargarKB,alimentar:cargarPendientes,notas:cargarNotas,auditoria:cargarAuditoria,conexion:cargarConexion,usuarios:cargarUsuarios};
 const TABS=Object.keys(LOADERS);
@@ -1244,7 +1294,6 @@ async function cargarStats(){
   $('#dtext').innerHTML=`<b>${s.escalados}</b> de <b>${s.total}</b> conversaciones requieren seguimiento del coordinador de zona.`;
   const geo=(arr)=>arr.map(([k,v])=>`<div class="geo"><span>${k}</span><b>${v}</b></div>`).join('')||'<span class="muted">Aún no se captura ubicación</span>';
   $('#munis').innerHTML=geo(s.top_municipios);$('#cols').innerHTML=geo(s.top_colonias);
-  $('#recientes').innerHTML=s.recientes.map(r=>`<div class="geo"><span style="flex:1">${tag(r.tipo)} ${r.mensaje.slice(0,70)}</span><span class="muted">${[r.colonia,r.municipio].filter(Boolean).join(', ')||'—'} ${r.escalar?ICONS.flag:''}</span></div>`).join('')||'<span class="muted">Sin conversaciones aún. Prueba el chat en la pestaña Pruebas.</span>';
 }
 
 async function cargarTendencias(){
@@ -1321,14 +1370,56 @@ async function toggleEsc(numero){
   cargarEscalados();
 }
 // --- explorar ---
+const EX_POR_PAGINA=20;
+let _explorarList=[], _explorarCache={}, _exPage=1;
 async function cargarExplorar(){
   const q=$('#ex-q').value||'',tipo=$('#ex-tipo').value||'';
   const d=await(await fetch('/api/conversaciones?q='+encodeURIComponent(q)+'&tipo='+encodeURIComponent(tipo))).json();
-  $('#ex-count').textContent=d.total+' resultados';
-  $('#ex-list').innerHTML=d.items.length?d.items.map(x=>`<div class="conv">
-    <div class="muted">${x.fecha} · ${tag(x.tipo)} ${[x.colonia,x.municipio].filter(Boolean).join(', ')} ${x.escalar?ICONS.flag:''} ${x.origen==='prueba'?'<span class="tag">prueba</span>':''}</div>
-    <div>${ICONS.user} ${x.mensaje}</div><div>${ICONS.dot('#1a9d6c')} ${(x.respuesta||'').slice(0,220)}</div></div>`).join(''):'<span class="muted">Sin resultados</span>';
+  _explorarList=d.items;
+  _explorarCache={};
+  d.items.forEach(x=>_explorarCache[x.numero]=x);
+  _exPage=1;
+  renderExplorar();
 }
+function exIrPagina(p){_exPage=p;renderExplorar();}
+function renderExplorar(){
+  const total=_explorarList.length;
+  $('#ex-count').textContent=total+' usuario'+(total===1?'':'s');
+  const totalPaginas=Math.max(1,Math.ceil(total/EX_POR_PAGINA));
+  if(_exPage>totalPaginas)_exPage=totalPaginas;
+  const inicio=(_exPage-1)*EX_POR_PAGINA;
+  const pagina=_explorarList.slice(inicio,inicio+EX_POR_PAGINA);
+  $('#ex-body').innerHTML=pagina.length?pagina.map(x=>{
+    const msj=x.mensaje?('<span title="'+x.mensaje.replace(/"/g,'&quot;')+'">'+x.mensaje.slice(0,60)+(x.mensaje.length>60?'…':'')+'</span>'):'<span class="muted">—</span>';
+    return `<tr style="cursor:pointer" onclick="abrirExplorarModal('${x.numero}')">
+      <td class="muted">${x.fecha}</td>
+      <td>${x.numero}${x.escalar?' '+ICONS.flag:''}</td>
+      <td>${x.tipo?tag(x.tipo):'<span class="muted">—</span>'}</td>
+      <td>${[x.colonia,x.municipio].filter(Boolean).join(', ')||'<span class="muted">—</span>'}</td>
+      <td>${msj}</td>
+      <td>${x.n}</td>
+    </tr>`;
+  }).join(''):'<tr><td colspan="6"><span class="muted">Sin resultados</span></td></tr>';
+  $('#ex-pager').innerHTML=total?(
+    '<button class="ghost" '+(_exPage<=1?'disabled':'')+' onclick="exIrPagina('+(_exPage-1)+')">← Anterior</button>'+
+    '<span class="muted" style="padding:0 10px;font-size:13px">Página '+_exPage+' de '+totalPaginas+'</span>'+
+    '<button class="ghost" '+(_exPage>=totalPaginas?'disabled':'')+' onclick="exIrPagina('+(_exPage+1)+')">Siguiente →</button>'
+  ):'';
+}
+function abrirExplorarModal(numero){
+  const x=_explorarCache[numero]; if(!x)return;
+  $('#ex-modal-title').textContent='Historial · '+numero;
+  const chat=$('#ex-modal-chat');
+  chat.innerHTML=(x.historial||[]).map(h=>{
+    let html=`<div class="muted" style="font-size:10.5px;text-align:center;margin:8px 0 2px">${h.fecha}${h.tipo?(' · '+h.tipo):''}</div>`;
+    if(h.mensaje)html+=`<div class="b bot">${h.mensaje.replace(/</g,'&lt;')}</div>`;
+    if(h.respuesta)html+=`<div class="b yo">${h.respuesta.replace(/</g,'&lt;')}</div>`;
+    return html;
+  }).join('');
+  $('#exmodal').classList.remove('hide');
+  chat.scrollTop=chat.scrollHeight;
+}
+function cerrarExplorarModal(){$('#exmodal').classList.add('hide');}
 // --- contactos ---
 const POSTURA_LBL={simpatizante:'Simpatizante',neutral:'Neutral',opositor:'Opositor',sin_datos:'Sin datos'};
 const CT_POR_PAGINA=15;
@@ -1516,7 +1607,32 @@ async function soltar(e,col){e.preventDefault();document.querySelectorAll('.kcol
 async function guardarMeta(){await fetch('/api/meta',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texto:$('#seg-mtexto').value,objetivo:$('#seg-mobj').value})});cargarSeguimiento();}
 
 // --- conexión Green API ---
+function bloquearGreen(){
+  ['g-id','g-token','g-url'].forEach(id=>$('#'+id).disabled=true);
+  $('#g-guardar-btn').disabled=true;
+  $('#g-bloqueo').style.display='flex';
+}
+function desbloquearGreen(){
+  ['g-id','g-token','g-url'].forEach(id=>$('#'+id).disabled=false);
+  $('#g-guardar-btn').disabled=false;
+  $('#g-bloqueo').style.display='none';
+}
+function pedirPasswordGreen(){
+  $('#pw-input').value='';
+  $('#pw-flash').textContent='';
+  $('#pwmodal').classList.remove('hide');
+  setTimeout(()=>$('#pw-input').focus(),50);
+}
+function cerrarPasswordModal(){$('#pwmodal').classList.add('hide');}
+async function confirmarPasswordGreen(){
+  const clave=$('#pw-input').value;
+  if(!clave){$('#pw-flash').textContent='Escribe tu contraseña';return;}
+  const d=await(await fetch('/api/verificar-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clave})})).json();
+  if(d.ok){cerrarPasswordModal();desbloquearGreen();}
+  else $('#pw-flash').textContent='Contraseña incorrecta';
+}
 async function cargarConexion(){
+  bloquearGreen();
   $('#g-webhook').textContent=location.origin.replace('panel','bot').replace(/froy-[a-z0-9]+\./,'')+'/green-webhook';
   // el webhook va al dominio del BOT (webhook server), no al del panel:
   $('#g-webhook').textContent='https://187.127.251.161.sslip.io/green-webhook';
@@ -1527,7 +1643,9 @@ async function cargarConexion(){
 async function guardarGreen(){
   const b={id_instance:$('#g-id').value,api_token:$('#g-token').value,api_url:$('#g-url').value};
   const d=await(await fetch('/api/green-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();
-  $('#g-flash').textContent=d.ok?'✓ Guardado':'⚠ error'; probarGreen(true);
+  $('#g-flash').textContent=d.ok?'✓ Guardado':'⚠ error';
+  if(d.ok)bloquearGreen();
+  probarGreen(true);
 }
 async function probarGreen(silent){
   $('#g-estado').innerHTML='<span class="muted">Consultando…</span>';

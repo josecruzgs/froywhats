@@ -105,6 +105,13 @@ ahí (cifras, montos, programas de becas, hospitales, el portal becasycredito.so
 escuela privada, los teléfonos, etc.) está VERIFICADO y el bot SÍ puede decirlo — NO lo marques como
 inventado. Solo marca como inventado lo que NO esté respaldado por la base de conocimiento o la contradiga.
 
+REGLA CLAVE 2 — MEMORIA DEL CONTACTO: si estas instrucciones incluyen un bloque "Dato ya conocido de
+este contacto" (nombre, ciudad, colonia), el bot tiene memoria persistente por número de WhatsApp —
+usar esos datos (p. ej. saludar por su nombre) es memoria legítima del sistema, NO es un dato inventado,
+aunque el ciudadano no lo haya dicho en ESTE mensaje puntual. Tampoco lo marques como inventado si el
+dato (nombre, ciudad, colonia) aparece textualmente en el MENSAJE DEL CIUDADANO de abajo. Solo marca como
+inventado un nombre/dato personal si NO viene ni del contacto ya conocido ni del mensaje actual.
+
 A) CUMPLIMIENTO LEGAL (acto anticipado de campaña). RECHAZA si la respuesta:
    - pide o confirma el voto ("vota por", "vótame", "sí, dame tu voto")
    - menciona boleta o fecha del proceso ligadas a Froy
@@ -138,13 +145,16 @@ B) NATURALIDAD (que NO parezca bot). RECHAZA si la respuesta:
 Devuelve SOLO este JSON:
 {"ok": true|false, "problemas": ["..."], "sugerencia": "qué cambiar en concreto"}"""
 
-def _critica(mensaje, borrador):
+def _critica(mensaje, borrador, contacto=None):
+    sysblocks = [{"type": "text", "text": CRITICO_SYS}]
+    ctx = _contexto_contacto(contacto)
+    if ctx:
+        sysblocks.append({"type": "text", "text": ctx})
+    sysblocks.append({"type": "text",
+                       "text": "\n\n===== BASE DE CONOCIMIENTO (todo esto es VERIFICADO) =====\n" + KB_TEXT,
+                       "cache_control": {"type": "ephemeral"}})
     resp = cliente.messages.create(
-        model=MODELO_CRITICO, max_tokens=400,
-        system=[{"type": "text", "text": CRITICO_SYS},
-                {"type": "text",
-                 "text": "\n\n===== BASE DE CONOCIMIENTO (todo esto es VERIFICADO) =====\n" + KB_TEXT,
-                 "cache_control": {"type": "ephemeral"}}],
+        model=MODELO_CRITICO, max_tokens=400, system=sysblocks,
         messages=[{"role": "user", "content":
             f"MENSAJE DEL CIUDADANO:\n{mensaje}\n\nRESPUESTA PROPUESTA:\n{borrador.get('respuesta','')}"}])
     return _json_de(_texto(resp))
@@ -198,7 +208,7 @@ def responder(mensaje, historial=None, verbose=False, contacto=None):
     historial = (historial or []) + [{"role": "user", "content": mensaje}]
     salida = _borrador(historial, contacto)
     for i in range(MAX_LOOPS):
-        crit = _critica(mensaje, salida)
+        crit = _critica(mensaje, salida, contacto)
         duros = _checar_duro(salida.get("respuesta", ""))
         # auditar si hubo un problema de cumplimiento (determinista o del crítico)
         motivos = list(duros)
