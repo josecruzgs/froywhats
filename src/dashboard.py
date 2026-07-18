@@ -47,6 +47,10 @@ def listar_contactos():
             postura TEXT, canal TEXT, mensajes INTEGER NOT NULL DEFAULT 0,
             primera_vez TEXT NOT NULL, actualizado_en TEXT NOT NULL,
             jornada INTEGER NOT NULL DEFAULT 0)""")
+        try:  # migración para bases ya existentes creadas antes de la columna `jornada`
+            con.execute("ALTER TABLE contactos ADD COLUMN jornada INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # ya existe
         filas = con.execute("""SELECT numero,nombre,ciudad,colonia,tema,postura,canal,
             mensajes,primera_vez,actualizado_en,jornada FROM contactos ORDER BY actualizado_en DESC""").fetchall()
     finally:
