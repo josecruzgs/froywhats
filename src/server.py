@@ -24,6 +24,54 @@ MENSAJE_AUDIO_FALLIDO = "no pude escuchar bien tu audio 🙏 ¿me lo puedes escr
 HUMANIZAR = os.environ.get("HUMANIZAR", "1") != "0"
 _vistos = set()    # ids de mensajes ya procesados (evita duplicados por reintentos de Meta)
 
+# Cada mensaje entrante corre en su propio hilo, y el webhook corre en varios workers de
+# gunicorn (procesos separados). Si el mismo número escribe dos mensajes seguidos (p.ej.
+# responde rápido al saludo), el segundo puede leer el historial ANTES de que el primero
+# lo haya guardado (guardar_historial pasa hasta el final, después de las pausas
+# humanizadas de varios segundos) -> el agente ve una conversación vacía y saluda de
+# nuevo. Se serializa el procesamiento por número con un lock en SQLite: funciona entre
+# threads y entre procesos, no solo dentro de un worker.
+LOCK_TTL_SEG = 120        # si un worker muere con el lock tomado, se considera abandonado tras esto
+LOCK_ESPERA_MAX_SEG = 90  # cuánto espera un mensaje a que termine el anterior del mismo número
+
+class _LockNumero:
+    """Lock por número de teléfono usando la tabla `locks` de SQLite (cross-proceso)."""
+    def __init__(self, numero):
+        self.numero = numero
+
+    def __enter__(self):
+        limite = time.time() + LOCK_ESPERA_MAX_SEG
+        while True:
+            con = _db()
+            try:
+                ahora = datetime.datetime.utcnow()
+                vencido = (ahora - datetime.timedelta(seconds=LOCK_TTL_SEG)).isoformat()
+                con.execute("DELETE FROM locks WHERE numero=? AND adquirido_en<?", (self.numero, vencido))
+                try:
+                    con.execute("INSERT INTO locks (numero, adquirido_en) VALUES (?,?)",
+                                (self.numero, ahora.isoformat()))
+                    con.commit()
+                    return self
+                except sqlite3.IntegrityError:
+                    con.rollback()
+            finally:
+                con.close()
+            if time.time() >= limite:
+                print(f"Lock de {self.numero} no se liberó a tiempo, sigo de todos modos", flush=True)
+                return self
+            time.sleep(0.3)
+
+    def __exit__(self, *exc):
+        con = _db()
+        try:
+            con.execute("DELETE FROM locks WHERE numero=?", (self.numero,))
+            con.commit()
+        finally:
+            con.close()
+
+def _lock_de(numero):
+    return _LockNumero(numero)
+
 TOKEN     = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_ID  = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
 VERIFY    = os.environ.get("WHATSAPP_VERIFY_TOKEN", "froy-verify-2026")
@@ -58,7 +106,16 @@ def _db():
         canal TEXT,
         mensajes INTEGER NOT NULL DEFAULT 0,
         primera_vez TEXT NOT NULL,
-        actualizado_en TEXT NOT NULL
+        actualizado_en TEXT NOT NULL,
+        jornada INTEGER NOT NULL DEFAULT 0
+    )""")
+    try:  # migración para bases ya existentes creadas antes de la columna `jornada`
+        con.execute("ALTER TABLE contactos ADD COLUMN jornada INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # ya existe
+    con.execute("""CREATE TABLE IF NOT EXISTS locks (
+        numero TEXT PRIMARY KEY,
+        adquirido_en TEXT NOT NULL
     )""")
     con.execute("PRAGMA journal_mode=WAL")
     return con
@@ -87,12 +144,12 @@ def cargar_contacto(numero):
     con = _db()
     try:
         row = con.execute(
-            "SELECT nombre, ciudad, colonia, tema, postura, mensajes FROM contactos WHERE numero=?",
+            "SELECT nombre, ciudad, colonia, tema, postura, mensajes, jornada FROM contactos WHERE numero=?",
             (numero,)).fetchone()
         if not row:
             return None
         return {"nombre": row[0], "ciudad": row[1], "colonia": row[2],
-                "tema": row[3], "postura": row[4], "mensajes": row[5]}
+                "tema": row[3], "postura": row[4], "mensajes": row[5], "jornada": bool(row[6])}
     finally:
         con.close()
 
@@ -103,7 +160,7 @@ def actualizar_contacto(numero, meta, canal):
     con = _db()
     try:
         prev = con.execute(
-            "SELECT nombre, ciudad, colonia, tema, postura, mensajes, primera_vez FROM contactos WHERE numero=?",
+            "SELECT nombre, ciudad, colonia, tema, postura, mensajes, primera_vez, jornada FROM contactos WHERE numero=?",
             (numero,)).fetchone()
         nombre = meta.get("nombre") or (prev[0] if prev else None)
         ciudad = meta.get("municipio") or (prev[1] if prev else None)
@@ -112,15 +169,16 @@ def actualizar_contacto(numero, meta, canal):
         postura = meta.get("postura") or (prev[4] if prev else None)
         mensajes = (prev[5] if prev else 0) + 1
         primera_vez = prev[6] if prev else datetime.datetime.utcnow().isoformat()
+        jornada = int(bool(meta.get("jornada")) or bool(prev[7] if prev else False))
         ahora = datetime.datetime.utcnow().isoformat()
         con.execute("""
-            INSERT INTO contactos (numero,nombre,ciudad,colonia,tema,postura,canal,mensajes,primera_vez,actualizado_en)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO contactos (numero,nombre,ciudad,colonia,tema,postura,canal,mensajes,primera_vez,actualizado_en,jornada)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(numero) DO UPDATE SET
                 nombre=excluded.nombre, ciudad=excluded.ciudad, colonia=excluded.colonia,
                 tema=excluded.tema, postura=excluded.postura, canal=excluded.canal,
-                mensajes=excluded.mensajes, actualizado_en=excluded.actualizado_en
-        """, (numero, nombre, ciudad, colonia, tema, postura, canal, mensajes, primera_vez, ahora))
+                mensajes=excluded.mensajes, actualizado_en=excluded.actualizado_en, jornada=excluded.jornada
+        """, (numero, nombre, ciudad, colonia, tema, postura, canal, mensajes, primera_vez, ahora, jornada))
         con.commit()
     finally:
         con.close()
@@ -208,7 +266,7 @@ def guardar_registro(numero, mensaje, salida, origen="whatsapp"):
         "mensaje": mensaje,
         "respuesta": salida.get("respuesta", ""),
         **{k: meta.get(k) for k in
-           ("tipo", "tema", "municipio", "colonia", "audiencia", "escalar", "motivo_escalamiento")},
+           ("tipo", "tema", "municipio", "colonia", "audiencia", "escalar", "motivo_escalamiento", "jornada")},
     }
     with open(REGISTROS, "a") as f:
         f.write(json.dumps(registro, ensure_ascii=False) + "\n")
@@ -225,28 +283,29 @@ def procesar(numero, message_id, texto=None, audio_media_id=None):
     """Hace todo el trabajo pesado (agente + ritmo humano + envío). Corre en un hilo
     aparte para que el webhook le responda a Meta de inmediato."""
     try:
-        leido_y_escribiendo(message_id)  # palomita azul + 'escribiendo…' mientras piensa
-        if audio_media_id and not texto:
-            try:
-                media_url = _descargar_media_meta(audio_media_id)
-                texto = _transcribir_desde_url(media_url, headers={"Authorization": f"Bearer {TOKEN}"})
-            except Exception as e:
-                print("Error transcribiendo audio Meta:", e, flush=True)
-                texto = None
-            if not texto or not texto.strip():
-                enviar_whatsapp(numero, MENSAJE_AUDIO_FALLIDO)
-                return
-        hist = cargar_historial(numero)
-        contacto = cargar_contacto(numero)
-        t0 = time.time()
-        salida = agente.responder(texto, hist, contacto=contacto)
-        pensado = time.time() - t0  # ya se mostró 'escribiendo…' este rato
-        responder_humano(numero, message_id, texto, salida, ya_pensado=pensado)
-        guardar_registro(numero, texto, salida)
-        actualizar_contacto(numero, salida.get("meta"), "whatsapp")
-        hist += [{"role": "user", "content": texto},
-                 {"role": "assistant", "content": salida.get("respuesta", "")}]
-        guardar_historial(numero, hist[-12:])
+        with _lock_de(numero):  # evita que dos mensajes seguidos del mismo número se pisen el historial
+            leido_y_escribiendo(message_id)  # palomita azul + 'escribiendo…' mientras piensa
+            if audio_media_id and not texto:
+                try:
+                    media_url = _descargar_media_meta(audio_media_id)
+                    texto = _transcribir_desde_url(media_url, headers={"Authorization": f"Bearer {TOKEN}"})
+                except Exception as e:
+                    print("Error transcribiendo audio Meta:", e, flush=True)
+                    texto = None
+                if not texto or not texto.strip():
+                    enviar_whatsapp(numero, MENSAJE_AUDIO_FALLIDO)
+                    return
+            hist = cargar_historial(numero)
+            contacto = cargar_contacto(numero)
+            t0 = time.time()
+            salida = agente.responder(texto, hist, contacto=contacto)
+            pensado = time.time() - t0  # ya se mostró 'escribiendo…' este rato
+            responder_humano(numero, message_id, texto, salida, ya_pensado=pensado)
+            guardar_registro(numero, texto, salida)
+            actualizar_contacto(numero, salida.get("meta"), "whatsapp")
+            hist += [{"role": "user", "content": texto},
+                     {"role": "assistant", "content": salida.get("respuesta", "")}]
+            guardar_historial(numero, hist[-12:])
     except Exception as e:
         print("Error procesando mensaje:", e, flush=True)
 
@@ -284,37 +343,38 @@ _green_vistos = set()
 def procesar_green(chat_id, numero, mensaje):
     """Trabajo pesado para un mensaje de Green API (agente + ritmo humano + envío)."""
     try:
-        origen = "green"
-        if mensaje["tipo"] == "audio":
-            try:
-                texto = _transcribir_desde_url(mensaje["url"])
-            except Exception as e:
-                print("Error transcribiendo audio Green:", e, flush=True)
-                texto = None
-            if not texto or not texto.strip():
-                green_api.enviar(chat_id, MENSAJE_AUDIO_FALLIDO)
-                return
-            origen = "green-audio"
-        else:
-            texto = mensaje["texto"]
-        hist = cargar_historial(numero)
-        contacto = cargar_contacto(numero)
-        salida = agente.responder(texto, hist, contacto=contacto)
-        respuesta = salida.get("respuesta", "")
-        globos = humanizar.dividir_en_globos(respuesta)
-        for i, g in enumerate(globos):
-            if HUMANIZAR:
-                espera = humanizar.tiempo_escritura(g)
-                green_api.escribiendo(chat_id, ms=int(espera * 1000))
-                time.sleep(espera)
-            green_api.enviar(chat_id, g)
-            if HUMANIZAR and i < len(globos) - 1:
-                time.sleep(humanizar.pausa_entre_globos())
-        guardar_registro(numero, texto, salida, origen=origen)
-        actualizar_contacto(numero, salida.get("meta"), origen)
-        hist += [{"role": "user", "content": texto},
-                 {"role": "assistant", "content": respuesta}]
-        guardar_historial(numero, hist[-12:])
+        with _lock_de(numero):  # evita que dos mensajes seguidos del mismo número se pisen el historial
+            origen = "green"
+            if mensaje["tipo"] == "audio":
+                try:
+                    texto = _transcribir_desde_url(mensaje["url"])
+                except Exception as e:
+                    print("Error transcribiendo audio Green:", e, flush=True)
+                    texto = None
+                if not texto or not texto.strip():
+                    green_api.enviar(chat_id, MENSAJE_AUDIO_FALLIDO)
+                    return
+                origen = "green-audio"
+            else:
+                texto = mensaje["texto"]
+            hist = cargar_historial(numero)
+            contacto = cargar_contacto(numero)
+            salida = agente.responder(texto, hist, contacto=contacto)
+            respuesta = salida.get("respuesta", "")
+            globos = humanizar.dividir_en_globos(respuesta)
+            for i, g in enumerate(globos):
+                if HUMANIZAR:
+                    espera = humanizar.tiempo_escritura(g)
+                    green_api.escribiendo(chat_id, ms=int(espera * 1000))
+                    time.sleep(espera)
+                green_api.enviar(chat_id, g)
+                if HUMANIZAR and i < len(globos) - 1:
+                    time.sleep(humanizar.pausa_entre_globos())
+            guardar_registro(numero, texto, salida, origen=origen)
+            actualizar_contacto(numero, salida.get("meta"), origen)
+            hist += [{"role": "user", "content": texto},
+                     {"role": "assistant", "content": respuesta}]
+            guardar_historial(numero, hist[-12:])
     except Exception as e:
         print("Error procesando mensaje Green:", e, flush=True)
 

@@ -102,6 +102,8 @@ En cada interacción intenta, con naturalidad y sin interrogar, identificar y re
   se identifica con la causa), `neutral` (solo pide información o un trámite, sin señal de apoyo u
   oposición), `opositor` (tono hostil, crítico o contrario), `sin_datos` (no hay suficiente
   información en el mensaje para inferir nada — úsalo casi siempre en el primer mensaje).
+- Si la persona pregunta o comenta algo sobre **"jornada" o "jornadas"** (jornada de trabajo, jornada
+  electoral, etc.), marca `jornada: true` en los metadatos.
 
 Además de tu respuesta al ciudadano, devuelve SIEMPRE un bloque de metadatos estructurado
 (lo consume el sistema, no se le muestra al ciudadano) con este formato JSON:
@@ -118,7 +120,8 @@ Además de tu respuesta al ciudadano, devuelve SIEMPRE un bloque de metadatos es
     "audiencia": "<maestra | mama_familia | joven | ganadero | obrero | comerciante | null>",
     "escalar": true/false,
     "motivo_escalamiento": "<o null>",
-    "postura": "simpatizante | neutral | opositor | sin_datos"
+    "postura": "simpatizante | neutral | opositor | sin_datos",
+    "jornada": true/false
   }
 }
 ```

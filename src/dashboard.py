@@ -45,13 +45,14 @@ def listar_contactos():
         con.execute("""CREATE TABLE IF NOT EXISTS contactos (
             numero TEXT PRIMARY KEY, nombre TEXT, ciudad TEXT, colonia TEXT, tema TEXT,
             postura TEXT, canal TEXT, mensajes INTEGER NOT NULL DEFAULT 0,
-            primera_vez TEXT NOT NULL, actualizado_en TEXT NOT NULL)""")
+            primera_vez TEXT NOT NULL, actualizado_en TEXT NOT NULL,
+            jornada INTEGER NOT NULL DEFAULT 0)""")
         filas = con.execute("""SELECT numero,nombre,ciudad,colonia,tema,postura,canal,
-            mensajes,primera_vez,actualizado_en FROM contactos ORDER BY actualizado_en DESC""").fetchall()
+            mensajes,primera_vez,actualizado_en,jornada FROM contactos ORDER BY actualizado_en DESC""").fetchall()
     finally:
         con.close()
     cols = ["numero", "nombre", "ciudad", "colonia", "tema", "postura", "canal",
-            "mensajes", "primera_vez", "actualizado_en"]
+            "mensajes", "primera_vez", "actualizado_en", "jornada"]
     return [dict(zip(cols, f)) for f in filas]
 
 app = Flask(__name__)
@@ -220,6 +221,7 @@ def _norm(s):
     return s
 
 COORDS = {
+    # Sonora
     "hermosillo": (29.0729, -110.9559), "cajeme": (27.4863, -109.9303),
     "ciudad obregon": (27.4863, -109.9303), "obregon": (27.4863, -109.9303),
     "nogales": (31.3186, -110.9458), "san luis rio colorado": (32.4595, -114.7722),
@@ -231,6 +233,31 @@ COORDS = {
     "cananea": (30.9876, -110.3007), "etchojoa": (26.9000, -109.6300),
     "alamos": (27.0256, -108.9389), "sonoyta": (31.8600, -112.8500),
     "nacozari": (30.3900, -109.6800),
+    # Baja California
+    "mexicali": (32.6245, -115.4523), "tijuana": (32.5149, -117.0382),
+    "ensenada": (31.8667, -116.5964), "tecate": (32.5667, -116.6333),
+    "rosarito": (32.3617, -117.0594),
+    # Sinaloa
+    "culiacan": (24.8087, -107.3940), "mazatlan": (23.2494, -106.4103),
+    "los mochis": (25.7947, -108.9961), "guasave": (25.5686, -108.4708),
+    # Chihuahua
+    "chihuahua": (28.6353, -106.0889), "ciudad juarez": (31.6904, -106.4245),
+    "juarez": (31.6904, -106.4245),
+    # Baja California Sur
+    "la paz": (24.1426, -110.3128), "los cabos": (22.8905, -109.9167),
+    "cabo san lucas": (22.8905, -109.9167),
+    # otras grandes ciudades de México
+    "ciudad de mexico": (19.4326, -99.1332), "cdmx": (19.4326, -99.1332),
+    "df": (19.4326, -99.1332), "guadalajara": (20.6597, -103.3496),
+    "monterrey": (25.6866, -100.3161), "tepic": (21.5041, -104.8942),
+    "durango": (24.0277, -104.6532), "torreon": (25.5428, -103.4068),
+    "puebla": (19.0414, -98.2063), "leon": (21.1250, -101.6860),
+    "queretaro": (20.5888, -100.3899), "merida": (20.9674, -89.5926),
+    # Arizona / California (EE.UU., destino frecuente de paisanos sonorenses)
+    "phoenix": (33.4484, -112.0740), "tucson": (32.2226, -110.9747),
+    "yuma": (32.6927, -114.6277), "los angeles": (34.0522, -118.2437),
+    "san diego": (32.7157, -117.1611), "las vegas": (36.1699, -115.1398),
+    "chicago": (41.8781, -87.6298),
 }
 
 @app.get("/api/mapa")
@@ -320,6 +347,7 @@ def api_conversaciones():
             "municipio": ultimo.get("municipio"),
             "colonia": ultimo.get("colonia"),
             "escalar": any(r.get("escalar") for r in regs),
+            "jornada": any(r.get("jornada") for r in regs),
             "origen": ultimo.get("origen"),
             "n": len(regs),
             "historial": [{"fecha": (r.get("fecha") or "")[:16].replace("T", " "),
@@ -348,7 +376,7 @@ def api_contactos():
 def export_csv():
     buf = io.StringIO()
     cols = ["fecha", "origen", "numero", "tipo", "tema", "municipio", "colonia",
-            "audiencia", "escalar", "mensaje", "respuesta"]
+            "audiencia", "escalar", "jornada", "mensaje", "respuesta"]
     w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for r in cargar_registros():
@@ -735,7 +763,7 @@ tailwind.config = {
   --bg:#f1f1f1;--card:#fff;--ink:#1a1210;--muted:#8f827f;--line:#efe6e4;
   --grad1:#b5261e;--grad2:#d8453b;--g1:var(--grad1);--g2:var(--grad2);
   --dark:#2a0e0c;--darker:#180706;--green:#16a34a;--amber:#ffb020;--red:#ff5d5d;
-  --pillbg:#fbe6e4;--pilltext:#96201a;
+  --pillbg:#fbe6e4;--pilltext:#96201a;--guinda:#6b0f2b;
   --shadow:0 10px 30px rgba(30,15,12,.07);--radius:24px;
 }
 *{box-sizing:border-box;font-family:'Inter',-apple-system,Segoe UI,Roboto,sans-serif}
@@ -869,6 +897,7 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .chip.acc{background:#eef0f7;color:#3a4256}
 .chip.perf{background:#e8f8ee;color:var(--grad1)}
 .chip.st{background:#fff3e0;color:#c8770a}.chip.st.ok{background:#e7f8ef;color:#0a8a52}
+.chip.jornada{background:var(--guinda);color:#fff}
 .rowbtns{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px;align-items:center}
 .btnmini{border:1px solid var(--line);background:#fff;border-radius:10px;padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;color:#3a4256;text-decoration:none;transition:.12s}
 .btnmini:hover{background:#f4f6fb;border-color:#d5dbea}
@@ -1072,8 +1101,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         </div>
         <div class="tablewrap">
         <table class="ctable">
-          <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th></tr></thead>
-          <tbody id="ex-body"><tr><td colspan="7"><span class="muted">Cargando…</span></td></tr></tbody>
+          <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th><th>Jornada</th></tr></thead>
+          <tbody id="ex-body"><tr><td colspan="8"><span class="muted">Cargando…</span></td></tr></tbody>
         </table>
         </div>
         <div id="ex-pager" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px"></div>
@@ -1097,8 +1126,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         </div>
         <div class="tablewrap">
         <table class="ctable">
-          <thead><tr><th>Número</th><th>Nombre</th><th>Ciudad</th><th>Colonia</th><th>Tema</th><th>Postura</th><th>Msjs</th><th>Última actividad</th></tr></thead>
-          <tbody id="ct-body"><tr><td colspan="8"><span class="muted">Cargando…</span></td></tr></tbody>
+          <thead><tr><th>Número</th><th>Nombre</th><th>Ciudad</th><th>Colonia</th><th>Tema</th><th>Postura</th><th>Jornada</th><th>Msjs</th><th>Última actividad</th></tr></thead>
+          <tbody id="ct-body"><tr><td colspan="9"><span class="muted">Cargando…</span></td></tr></tbody>
         </table>
         </div>
         <div id="ct-pager" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:14px"></div>
@@ -1321,6 +1350,7 @@ function buscarSeccion(q){
 }
 const TAGCLS={queja:'q',solicitud:'s',apoyo:'a'};
 function tag(t){return '<span class="tag '+(TAGCLS[t]||'')+'">'+(t||'otro')+'</span>';}
+function chipJornada(v){return v?'<span class="chip jornada">jornada</span>':'';}
 
 async function cargarStats(){
   const s=await(await fetch('/api/stats')).json();
@@ -1441,8 +1471,9 @@ function renderExplorar(){
       <td>${[x.colonia,x.municipio].filter(Boolean).join(', ')||'<span class="muted">—</span>'}</td>
       <td>${msj}</td>
       <td>${x.n}</td>
+      <td>${chipJornada(x.jornada)}</td>
     </tr>`;
-  }).join(''):'<tr><td colspan="7"><span class="muted">Sin resultados</span></td></tr>';
+  }).join(''):'<tr><td colspan="8"><span class="muted">Sin resultados</span></td></tr>';
   $('#ex-pager').innerHTML=total?(
     '<button class="ghost" '+(_exPage<=1?'disabled':'')+' onclick="exIrPagina('+(_exPage-1)+')">← Anterior</button>'+
     '<span class="muted" style="padding:0 10px;font-size:13px">Página '+_exPage+' de '+totalPaginas+'</span>'+
@@ -1451,7 +1482,7 @@ function renderExplorar(){
 }
 function abrirExplorarModal(numero){
   const x=_explorarCache[numero]; if(!x)return;
-  $('#ex-modal-title').textContent='Historial · '+(x.nombre?(x.nombre+' · '+numero):numero);
+  $('#ex-modal-title').innerHTML='Historial · '+(x.nombre?(x.nombre+' · '+numero):numero).replace(/</g,'&lt;')+(x.jornada?' '+chipJornada(true):'');
   const chat=$('#ex-modal-chat');
   chat.innerHTML=(x.historial||[]).map(h=>{
     let html=`<div class="muted" style="font-size:10.5px;text-align:center;margin:8px 0 2px">${h.fecha}${h.tipo?(' · '+h.tipo):''}</div>`;
@@ -1495,10 +1526,11 @@ function renderContactos(){
       <td>${x.colonia||'<span class="muted">—</span>'}</td>
       <td>${tema}</td>
       <td><span class="postura ${p}">${POSTURA_LBL[p]||p}</span></td>
+      <td>${chipJornada(x.jornada)}</td>
       <td>${x.mensajes||0}</td>
       <td class="muted">${fecha}</td>
     </tr>`;
-  }).join(''):'<tr><td colspan="8"><span class="muted">Todavía no hay contactos registrados.</span></td></tr>';
+  }).join(''):'<tr><td colspan="9"><span class="muted">Todavía no hay contactos registrados.</span></td></tr>';
   $('#ct-pager').innerHTML=total?(
     '<button class="ghost" '+(_ctPage<=1?'disabled':'')+' onclick="ctIrPagina('+(_ctPage-1)+')">← Anterior</button>'+
     '<span class="muted" style="padding:0 10px;font-size:13px">Página '+_ctPage+' de '+totalPaginas+'</span>'+
@@ -1516,6 +1548,7 @@ function abrirContacto(numero){
     fila('Colonia', x.colonia||'<span class="muted">Sin datos</span>') +
     fila('Tema', x.tema?x.tema.replace(/</g,'&lt;'):'<span class="muted">Sin datos</span>') +
     fila('Postura', `<span class="postura ${p}">${POSTURA_LBL[p]||p}</span>`) +
+    fila('Jornada', x.jornada?chipJornada(true):'<span class="muted">Sin datos</span>') +
     fila('Canal', x.canal||'—') +
     fila('Mensajes', x.mensajes||0) +
     fila('Primer contacto', (x.primera_vez||'').slice(0,16).replace('T',' ')||'—') +
