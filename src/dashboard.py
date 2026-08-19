@@ -86,6 +86,8 @@ def _validar(usuario, clave):
 
 @app.before_request
 def _proteger():
+    if request.path == "/logout":           # la salida se atiende sin credenciales
+        return
     if not PANEL_PASS:                      # sin contraseña configurada (desarrollo local)
         g.usuario, g.rol = "local", "admin"
         return
@@ -102,7 +104,8 @@ def _solo_admin():
 
 @app.get("/api/me")
 def api_me():
-    return jsonify({"usuario": getattr(g, "usuario", ""), "rol": getattr(g, "rol", "")})
+    return jsonify({"usuario": getattr(g, "usuario", ""), "rol": getattr(g, "rol", ""),
+                    "protegido": bool(PANEL_PASS)})
 
 @app.post("/api/verificar-password")
 def api_verificar_password():
@@ -112,6 +115,22 @@ def api_verificar_password():
     clave = (request.get_json(force=True) or {}).get("clave", "")
     rol = _validar(getattr(g, "usuario", ""), clave)
     return jsonify({"ok": rol is not None})
+
+@app.get("/logout")
+def logout():
+    """Cierra la sesión del panel.
+
+    HTTP Basic Auth no tiene logout: el navegador guarda usuario y contraseña y los
+    reenvía solo en cada petición. La única forma de que las olvide es contestar 401
+    a una petición que SÍ trae cabecera Authorization; entonces reemplaza las que
+    tenía guardadas. El botón del panel pide /logout?limpiar=1 con credenciales
+    inválidas y después trae al usuario a esta misma página sin el parámetro.
+    """
+    if request.args.get("limpiar"):
+        return Response("", 401, {"WWW-Authenticate": 'Basic realm="Panel de Froy"',
+                                  "Cache-Control": "no-store"})
+    return Response(PAGINA_SALIDA, mimetype="text/html",
+                    headers={"Cache-Control": "no-store, must-revalidate"})
 
 # ---------- API: conexión Green API (solo admin) ----------
 @app.get("/api/green-config")
@@ -130,6 +149,29 @@ def api_green_config_set():
 def api_green_estado():
     _solo_admin()
     return jsonify(green_api.estado())
+
+@app.post("/api/green-logout")
+def api_green_logout():
+    """Desvincula el WhatsApp de la instancia.
+
+    Es destructivo (el bot deja de responder hasta que se escanee otro QR), así que
+    no basta con ser admin: hay que reescribir la contraseña. La verificación va
+    aquí en el servidor a propósito; la del navegador sola no protege nada.
+    """
+    _solo_admin()
+    clave = (request.get_json(force=True) or {}).get("clave", "")
+    if _validar(getattr(g, "usuario", ""), clave) != "admin":
+        return jsonify({"error": "contraseña incorrecta"}), 403
+    return jsonify(green_api.desvincular())
+
+@app.get("/api/green-qr")
+def api_green_qr():
+    """Código QR para vincular el WhatsApp del bot. El panel lo pide en bucle
+    porque Green API lo rota cada 20 segundos."""
+    _solo_admin()
+    r = jsonify(green_api.qr())
+    r.headers["Cache-Control"] = "no-store"
+    return r
 
 # ---------- utilidades ----------
 def _slug(t):
@@ -789,6 +831,8 @@ body{margin:0;background:#EAEAEC;color:var(--ink);overflow-x:hidden}
 .who{display:flex;align-items:center;gap:11px}
 .avatar{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--grad1),var(--grad2));color:#fff;display:grid;place-items:center;font-weight:800;font-size:15px;flex-shrink:0}
 .who .nm{font-weight:700;font-size:13.5px;line-height:1.3}.who .rl{color:var(--muted);font-size:11.5px}
+.logoutbtn{width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--ink);display:grid;place-items:center;cursor:pointer;flex-shrink:0;padding:0!important;box-shadow:var(--shadow)}
+.logoutbtn:hover{background:var(--grad1);border-color:var(--grad1);color:#fff}
 h1{font-size:34px;margin:0 0 4px;font-weight:800;letter-spacing:-.03em}.sub{color:var(--muted);font-size:13.5px;margin-bottom:24px}
 .bento{display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
 .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:24px}
@@ -859,6 +903,9 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .muted{color:var(--muted);font-size:13px}
 .hide{display:none}
 .flash{font-size:13px;color:#0a8;min-height:18px;margin-top:6px}
+.qrbox{background:#fff;border:1px solid var(--line);border-radius:16px;min-height:272px;display:grid;place-items:center;padding:16px;text-align:center}
+.qrbox img{width:240px;height:240px;image-rendering:pixelated;display:block}
+.qrbox .qrtxt{font-size:13px;color:var(--muted);line-height:1.55;max-width:290px}
 /* --- componentes nuevos --- */
 .row2{display:flex;gap:8px;flex-wrap:wrap}.row2 select{flex:1;min-width:130px}
 .notaform{background:#f7f9ff;border:1px solid var(--line);border-radius:14px;padding:10px;margin:6px 0}
@@ -997,7 +1044,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
    <div class="mx-auto w-full max-w-[1300px] 2xl:max-w-[1600px]">
     <div class="topbar">
       <div class="searchbox"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><input id="topsearch" placeholder="Buscar sección… (Enter)" onkeydown="if(event.key==='Enter')buscarSeccion(this.value)"></div>
-      <div class="who"><div class="avatar" id="avatarletra">·</div><div><div class="nm" id="whoami">…</div><div class="rl">Panel de campaña</div></div></div>
+      <div class="who"><div class="avatar" id="avatarletra">·</div><div><div class="nm" id="whoami">…</div><div class="rl">Panel de campaña</div></div><button class="logoutbtn" id="btn-logout" onclick="cerrarSesion()" title="Cerrar sesión" aria-label="Cerrar sesión" style="display:none"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button></div>
     </div>
 
     <!-- RESUMEN -->
@@ -1212,6 +1259,12 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
             <li>Activa <b>incomingWebhook</b> en Green API. ¡Listo, el bot ya contesta!</li>
           </ol>
         </div>
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><line x1="14" y1="14" x2="14" y2="21"/><line x1="18" y1="14" x2="21" y2="14"/><line x1="21" y1="18" x2="21" y2="21"/><line x1="14" y1="18" x2="17" y2="21"/></svg>Vincular WhatsApp por QR</div>
+          <p class="muted" style="font-size:13px">En el celular del bot: <b>WhatsApp → Ajustes → Dispositivos vinculados → Vincular dispositivo</b>, y apunta a este código. Se renueva solo cada pocos segundos.</p>
+          <div class="qrbox"><span class="qrtxt" id="qr-msg">Guarda primero las credenciales y pulsa <b>Generar QR</b>.</span><img id="qr-img" alt="Código QR" style="display:none"></div>
+          <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="b1" id="qr-btn" onclick="toggleQR()">Generar QR</button><button class="ghost" id="qr-logout-btn" onclick="pedirDesvincular()" style="color:#b5261e;border-color:#f0d5d3">Desvincular WhatsApp</button></div>
+          <div class="flash" id="qr-flash"></div>
+        </div>
       </div>
     </section>
 
@@ -1278,7 +1331,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 <div id="pwmodal" class="modal hide">
   <div class="modalbox">
     <div class="h" style="font-size:16px;margin-bottom:4px">Confirma tu contraseña</div>
-    <p class="muted" style="font-size:13px;margin-top:0">Para desbloquear la edición de la conexión de WhatsApp, confirma tu contraseña.</p>
+    <p class="muted" style="font-size:13px;margin-top:0" id="pw-texto">Para desbloquear la edición de la conexión de WhatsApp, confirma tu contraseña.</p>
     <input type="password" id="pw-input" placeholder="Tu contraseña" onkeydown="if(event.key==='Enter')confirmarPasswordGreen()">
     <div class="flash" id="pw-flash"></div>
     <div style="margin-top:14px;display:flex;gap:8px"><button class="b1" onclick="confirmarPasswordGreen()">Confirmar</button><button class="ghost" onclick="cerrarPasswordModal()">Cancelar</button></div>
@@ -1339,6 +1392,7 @@ const TABS=Object.keys(LOADERS);
 function toggleSide(){$('#sidebar').classList.toggle('expanded');$('#sidebackdrop').classList.toggle('show');}
 function cerrarSide(){$('#sidebar').classList.remove('expanded');$('#sidebackdrop').classList.remove('show');}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>{
+  pararQR();   // si se sale de Conexion, deja de pedirle el QR a Green API
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
   TABS.forEach(t=>$('#'+t).classList.toggle('hide',t!==b.dataset.t));
   try{localStorage.setItem('froy_tab',b.dataset.t);}catch(e){}
@@ -1697,19 +1751,26 @@ function desbloquearGreen(){
   $('#g-guardar-btn').disabled=false;
   $('#g-bloqueo').style.display='none';
 }
-function pedirPasswordGreen(){
+// El modal sirve para cualquier accion sensible: se le pasa que hacer tras confirmar.
+const PW_TEXTO_DEF='Para desbloquear la edici\u00f3n de la conexi\u00f3n de WhatsApp, confirma tu contrase\u00f1a.';
+let pwAccion=null;
+function pedirPasswordGreen(accion,texto){
+  pwAccion=(typeof accion==='function')?accion:null;
+  $('#pw-texto').textContent=texto||PW_TEXTO_DEF;
   $('#pw-input').value='';
   $('#pw-flash').textContent='';
   $('#pwmodal').classList.remove('hide');
   setTimeout(()=>$('#pw-input').focus(),50);
 }
-function cerrarPasswordModal(){$('#pwmodal').classList.add('hide');}
+function cerrarPasswordModal(){$('#pwmodal').classList.add('hide');pwAccion=null;}
 async function confirmarPasswordGreen(){
   const clave=$('#pw-input').value;
-  if(!clave){$('#pw-flash').textContent='Escribe tu contraseña';return;}
+  if(!clave){$('#pw-flash').textContent='Escribe tu contrase\u00f1a';return;}
   const d=await(await fetch('/api/verificar-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clave})})).json();
-  if(d.ok){cerrarPasswordModal();desbloquearGreen();}
-  else $('#pw-flash').textContent='Contraseña incorrecta';
+  if(!d.ok){$('#pw-flash').textContent='Contrase\u00f1a incorrecta';return;}
+  const accion=pwAccion;          // cerrarPasswordModal lo borra, hay que guardarlo antes
+  cerrarPasswordModal();
+  if(accion)accion(clave); else desbloquearGreen();
 }
 async function cargarConexion(){
   bloquearGreen();
@@ -1718,7 +1779,83 @@ async function cargarConexion(){
   $('#g-webhook').textContent='https://187.127.251.161.sslip.io/green-webhook';
   const c=await(await fetch('/api/green-config')).json();
   $('#g-id').value=c.id_instance||''; $('#g-token').value=c.api_token||''; $('#g-url').value=c.api_url||'https://api.green-api.com';
+  resetQR();
   probarGreen(true);
+}
+
+// --- QR de vinculacion. Green API lo rota cada 20s, por eso se pide en bucle ---
+let qrTimer=null,qrIntentos=0;
+const QR_MAX_INTENTOS=36;   // 36 x 5s = 3 min pidiendole codigos a Green API, y para
+function resetQR(){
+  pararQR('');
+  $('#qr-img').style.display='none'; $('#qr-img').removeAttribute('src');
+  $('#qr-msg').style.display='block';
+  $('#qr-msg').innerHTML='Guarda primero las credenciales y pulsa <b>Generar QR</b>.';
+}
+function pararQR(aviso){
+  if(qrTimer){clearInterval(qrTimer);qrTimer=null;}
+  const b=$('#qr-btn'); if(b)b.textContent='Generar QR';
+  if(aviso!==undefined&&$('#qr-flash'))$('#qr-flash').textContent=aviso;
+}
+function qrMsg(html){
+  $('#qr-img').style.display='none';
+  $('#qr-msg').style.display='block';
+  $('#qr-msg').innerHTML=html;
+}
+function toggleQR(){
+  if(qrTimer){pararQR('Actualizaci\u00f3n detenida.');return;}
+  $('#qr-btn').textContent='Detener';
+  qrIntentos=0;
+  qrMsg('Pidiendo el c\u00f3digo a Green API\u2026');
+  $('#qr-flash').textContent='';
+  tickQR();
+  qrTimer=setInterval(tickQR,5000);
+}
+function pedirDesvincular(){
+  pedirPasswordGreen(desvincularWhatsApp,
+    'Vas a desconectar el WhatsApp del bot: dejar\u00e1 de recibir y de responder mensajes hasta que escanees un QR nuevo. Confirma tu contrase\u00f1a para continuar.');
+}
+async function desvincularWhatsApp(clave){
+  pararQR('');
+  $('#g-flash').textContent='Desvinculando\u2026';
+  let d;
+  try{
+    d=await(await fetch('/api/green-logout',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({clave})})).json();
+  }catch(e){ $('#g-flash').textContent='No se pudo hablar con el servidor.'; return; }
+  if(d.isLogout){
+    resetQR();
+    qrMsg('Instancia libre. Pulsa <b>Generar QR</b> para vincular un WhatsApp.');
+    $('#g-flash').textContent='\u2713 WhatsApp desvinculado.';
+  }else{
+    $('#g-flash').textContent=d.error||d.message||'Green API no confirm\u00f3 la desvinculaci\u00f3n.';
+  }
+  probarGreen(true);
+}
+async function tickQR(){
+  if(++qrIntentos>QR_MAX_INTENTOS){
+    qrMsg('Se dej\u00f3 de pedir el c\u00f3digo tras 3 minutos sin vincular.<br>Pulsa <b>Generar QR</b> para intentarlo otra vez.');
+    pararQR('');
+    return;
+  }
+  let d;
+  try{ d=await(await fetch('/api/green-qr',{cache:'no-store'})).json(); }
+  catch(e){ qrMsg('No se pudo hablar con el servidor.'); pararQR(''); return; }
+  if(d.type==='qrCode'&&d.message){
+    $('#qr-msg').style.display='none';
+    $('#qr-img').src='data:image/png;base64,'+d.message;
+    $('#qr-img').style.display='block';
+    $('#qr-flash').textContent='C\u00f3digo activo \u2014 escan\u00e9alo desde el celular del bot.';
+  }else if(d.type==='alreadyLogged'){
+    qrMsg('<b>Ya hay un WhatsApp vinculado.</b><br>Para conectar otro n\u00famero pulsa <b>Desvincular WhatsApp</b> y genera el c\u00f3digo otra vez.');
+    pararQR('');
+    probarGreen(true);
+  }else if(d.type==='timeout'){
+    qrMsg('Green API tard\u00f3 en responder, reintentando\u2026');   // sin cortar el bucle
+  }else{
+    qrMsg(d.message||d.error||'Green API no devolvi\u00f3 ning\u00fan c\u00f3digo.');
+    pararQR('');
+  }
 }
 async function guardarGreen(){
   const b={id_instance:$('#g-id').value,api_token:$('#g-token').value,api_url:$('#g-url').value};
@@ -1748,6 +1885,7 @@ async function initRol(){
   const rol=me.rol||'brigadista'; ROL=rol;
   $('#whoami').textContent=me.usuario+' ('+rol+')';
   $('#avatarletra').textContent=(me.usuario||'?')[0].toUpperCase();
+  if(me.protegido&&$('#btn-logout'))$('#btn-logout').style.display='grid';
   if($('#autor')&&!$('#autor').value)$('#autor').value=me.usuario||'';
   const permit=TABS_ROL[rol]||['pruebas'];
   document.querySelectorAll('.nav').forEach(b=>{if(!permit.includes(b.dataset.t))b.style.display='none';});
@@ -1850,9 +1988,48 @@ async function cargarNotas(){
 }
 async function setEstado(id,estado){await fetch('/api/nota/estado',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,estado})});cargarNotas();}
 
+// --- cerrar sesion (Basic Auth no tiene logout: hay que provocar un 401) ---
+async function cerrarSesion(){
+  if(!confirm('¿Cerrar sesión del panel?'))return;
+  // credenciales invalidas a proposito: al recibir 401 el navegador tira las guardadas
+  try{await fetch('/logout?limpiar=1',{cache:'no-store',
+      headers:{'Authorization':'Basic '+btoa('salir:'+Date.now())}});}catch(e){}
+  try{localStorage.removeItem('froy_tab');}catch(e){}
+  location.href='/logout';
+}
+
 $('#msg').addEventListener('keydown',e=>{if(e.key==='Enter')enviar();});
 initRol();
 </script></body></html>"""
+
+PAGINA_SALIDA = r"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sesión cerrada · Agente Froy</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<style>
+:root{--bg:#f1f1f1;--card:#fff;--ink:#1a1210;--muted:#8f827f;--line:#efe6e4;--grad1:#b5261e;--grad2:#d8453b}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);
+     font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:24px}
+.box{background:var(--card);border-radius:26px;box-shadow:0 2px 20px #0000000f;padding:40px 36px;
+     max-width:430px;width:100%;text-align:center}
+img{width:56px;height:56px;object-fit:contain;margin-bottom:18px}
+h1{font-size:26px;margin:0 0 10px;font-weight:800;letter-spacing:-.03em}
+p{color:var(--muted);font-size:14px;line-height:1.55;margin:0 0 22px}
+a.btn{display:inline-block;background:var(--ink);color:#fff;text-decoration:none;border-radius:999px;
+      padding:13px 26px;font-weight:700;font-size:14px}
+a.btn:hover{background:linear-gradient(135deg,var(--grad1),var(--grad2))}
+.nota{margin-top:22px;font-size:12px;color:var(--muted);line-height:1.5}
+</style></head><body>
+<div class="box">
+  <img src="/logo.png" alt="">
+  <h1>Sesión cerrada</h1>
+  <p>Ya saliste del panel. Para volver a entrar, el navegador te pedirá usuario y contraseña.</p>
+  <a class="btn" href="/">Entrar de nuevo</a>
+  <div class="nota">Si al volver te deja pasar sin preguntar nada, cierra todas las ventanas del
+  navegador: algunos (sobre todo Safari) conservan la contraseña hasta que se cierran por completo.</div>
+</div>
+</body></html>"""
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

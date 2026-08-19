@@ -50,6 +50,36 @@ def estado():
     except Exception as e:
         return {"error": str(e)}
 
+def qr():
+    """qr -> {'type': 'qrCode', 'message': '<PNG en base64, sin el prefijo data:>'}.
+
+    Solo devuelve código mientras la instancia NO está vinculada. Otros valores de
+    'type': 'alreadyLogged' (ya hay un WhatsApp conectado), 'timeout' (reintentar),
+    'error' y 'passkeyRequired'. Green API rota el QR cada 20 segundos.
+    """
+    c = cargar_config()
+    if not configurado():
+        return {"error": "sin configurar"}
+    try:
+        r = requests.get(f"{_base(c)}/qr/{c['api_token']}", timeout=25)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def desvincular():
+    """logout -> {'isLogout': True}. Desconecta el WhatsApp de la instancia: el bot
+    deja de recibir y de responder hasta que se escanee un QR nuevo. Green API exige
+    pasar por aquí antes de poder pedir otro código QR.
+    """
+    c = cargar_config()
+    if not configurado():
+        return {"error": "sin configurar"}
+    try:
+        r = requests.get(f"{_base(c)}/logout/{c['api_token']}", timeout=25)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
 def enviar(chat_id, texto):
     c = cargar_config()
     if not configurado():
