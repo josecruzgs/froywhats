@@ -18,6 +18,7 @@ import agente      # carga .env, system prompt y base de conocimiento
 import humanizar   # ritmo humano: lectura, escritura por globos, pausas
 import green_api   # WhatsApp vía Green API (no oficial, por QR)
 import transcribir_audio  # transcripción de notas de voz (faster-whisper, CPU)
+import intervenciones      # toma de control humano desde el panel (modo operador)
 
 MENSAJE_AUDIO_FALLIDO = "no pude escuchar bien tu audio 🙏 ¿me lo puedes escribir?"
 
@@ -30,47 +31,9 @@ _vistos = set()    # ids de mensajes ya procesados (evita duplicados por reinten
 # lo haya guardado (guardar_historial pasa hasta el final, después de las pausas
 # humanizadas de varios segundos) -> el agente ve una conversación vacía y saluda de
 # nuevo. Se serializa el procesamiento por número con un lock en SQLite: funciona entre
-# threads y entre procesos, no solo dentro de un worker.
-LOCK_TTL_SEG = 120        # si un worker muere con el lock tomado, se considera abandonado tras esto
-LOCK_ESPERA_MAX_SEG = 90  # cuánto espera un mensaje a que termine el anterior del mismo número
-
-class _LockNumero:
-    """Lock por número de teléfono usando la tabla `locks` de SQLite (cross-proceso)."""
-    def __init__(self, numero):
-        self.numero = numero
-
-    def __enter__(self):
-        limite = time.time() + LOCK_ESPERA_MAX_SEG
-        while True:
-            con = _db()
-            try:
-                ahora = datetime.datetime.utcnow()
-                vencido = (ahora - datetime.timedelta(seconds=LOCK_TTL_SEG)).isoformat()
-                con.execute("DELETE FROM locks WHERE numero=? AND adquirido_en<?", (self.numero, vencido))
-                try:
-                    con.execute("INSERT INTO locks (numero, adquirido_en) VALUES (?,?)",
-                                (self.numero, ahora.isoformat()))
-                    con.commit()
-                    return self
-                except sqlite3.IntegrityError:
-                    con.rollback()
-            finally:
-                con.close()
-            if time.time() >= limite:
-                print(f"Lock de {self.numero} no se liberó a tiempo, sigo de todos modos", flush=True)
-                return self
-            time.sleep(0.3)
-
-    def __exit__(self, *exc):
-        con = _db()
-        try:
-            con.execute("DELETE FROM locks WHERE numero=?", (self.numero,))
-            con.commit()
-        finally:
-            con.close()
-
-def _lock_de(numero):
-    return _LockNumero(numero)
+# threads y entre procesos, no solo dentro de un worker. Vive en intervenciones.py porque
+# el panel también lo necesita al mandar mensajes a mano por el mismo número.
+_lock_de = intervenciones.lock
 
 TOKEN     = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_ID  = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
@@ -271,6 +234,30 @@ def guardar_registro(numero, mensaje, salida, origen="whatsapp"):
     with open(REGISTROS, "a") as f:
         f.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
+def _atiende_operador(numero, texto, origen):
+    """Si un operador tomó el control de este chat, el agente NO contesta: solo se guarda
+    lo que escribió el ciudadano para que el operador lo vea en el panel y para que el
+    agente tenga el contexto completo cuando le devuelvan el control.
+    Devuelve True si el mensaje ya quedó atendido por esta vía."""
+    if not intervenciones.activa(numero):
+        return False
+    intervenciones.registrar(numero, mensaje=texto, respuesta="",
+                             origen=origen + "-operador", extra={"intervenido": True})
+    intervenciones.historial_append(numero, "user", texto)
+    actualizar_contacto(numero, None, origen)
+    print(f"{numero}: en control humano, el agente no responde", flush=True)
+    return True
+
+def _contexto_con_traspaso(contacto, numero):
+    """Añade al contexto del contacto el aviso de que un operador acaba de soltar el chat,
+    para que el agente retome sin repetir ni contradecir lo que dijo la persona."""
+    nota = intervenciones.nota_traspaso(intervenciones.consumir_traspaso(numero))
+    if not nota:
+        return contacto
+    ctx = dict(contacto or {})
+    ctx["nota_operador"] = nota
+    return ctx
+
 @app.get("/webhook")
 def verificar():
     """Meta verifica el webhook con un challenge."""
@@ -295,8 +282,10 @@ def procesar(numero, message_id, texto=None, audio_media_id=None):
                 if not texto or not texto.strip():
                     enviar_whatsapp(numero, MENSAJE_AUDIO_FALLIDO)
                     return
+            if _atiende_operador(numero, texto, "whatsapp"):
+                return
             hist = cargar_historial(numero)
-            contacto = cargar_contacto(numero)
+            contacto = _contexto_con_traspaso(cargar_contacto(numero), numero)
             t0 = time.time()
             salida = agente.responder(texto, hist, contacto=contacto)
             pensado = time.time() - t0  # ya se mostró 'escribiendo…' este rato
@@ -357,8 +346,10 @@ def procesar_green(chat_id, numero, mensaje):
                 origen = "green-audio"
             else:
                 texto = mensaje["texto"]
+            if _atiende_operador(numero, texto, origen):
+                return
             hist = cargar_historial(numero)
-            contacto = cargar_contacto(numero)
+            contacto = _contexto_con_traspaso(cargar_contacto(numero), numero)
             salida = agente.responder(texto, hist, contacto=contacto)
             respuesta = salida.get("respuesta", "")
             globos = humanizar.dividir_en_globos(respuesta)

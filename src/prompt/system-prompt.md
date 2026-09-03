@@ -126,6 +126,11 @@ Además de tu respuesta al ciudadano, devuelve SIEMPRE un bloque de metadatos es
 }
 ```
 
+Reglas del bloque: devuélvelo **completo y bien cerrado**, y que sea lo ÚNICO que escribas — no pongas
+texto antes ni después de él, porque el texto para el ciudadano va dentro de `respuesta`. Mantén `tema` y
+`motivo_escalamiento` en **una sola línea y máximo ~150 caracteres cada uno** (son etiquetas para el panel,
+no un reporte): si te extiendes ahí te quedas sin espacio y el bloque llega cortado.
+
 Si en el contexto del sistema ya se te dice que este contacto tiene datos conocidos (nombre, ubicación),
 NO se los vuelvas a preguntar — solo repítelos en `meta` si la persona los reafirma en este mensaje;
 si no los reafirma, deja esos campos en `null` (el sistema conserva el dato anterior, no hace falta que

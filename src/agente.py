@@ -20,6 +20,10 @@ except ImportError:
 MODELO_BORRADOR = os.environ.get("MODELO_BORRADOR", "claude-sonnet-4-6")
 MODELO_CRITICO  = os.environ.get("MODELO_CRITICO",  "claude-sonnet-4-6")
 MAX_LOOPS = int(os.environ.get("MAX_LOOPS", "2"))
+# Presupuesto de tokens del borrador. La respuesta al ciudadano es corta, pero el bloque
+# de `meta` que va en el mismo JSON puede alargarse (temas y motivos de escalamiento
+# descriptivos). Si se acaba a media meta, el JSON llega truncado: con 700 ya pasó.
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1400"))
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _cargar_env():
@@ -58,15 +62,122 @@ def recargar_conocimiento():
 def _texto(resp):
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
-def _json_de(texto):
-    """Extrae el primer objeto JSON del texto (el modelo a veces lo envuelve)."""
-    m = re.search(r"\{.*\}", texto, re.DOTALL)
-    if not m:
-        return {"respuesta": texto, "meta": {}}
+# La cerca se quita junto con su etiqueta de lenguaje (```json): si solo se recorta el
+# salto de linea previo, el `json` queda huerfano y se le manda al ciudadano.
+_CERCAS = re.compile(r"```[a-zA-Z]*[^\S\n]*\n?")
+_RESPUESTA_RE = re.compile(r'"respuesta"\s*:\s*"((?:[^"\\]|\\.)*)"', re.DOTALL)
+
+def _bloque_json(texto):
+    """Ubica el primer objeto JSON contando llaves y respetando las cadenas (una llave
+    dentro de un string no abre nivel). Devuelve (inicio, fin) con fin exclusivo, o
+    (inicio, -1) si el modelo se quedó sin tokens y nunca lo cerró."""
+    ini = texto.find("{")
+    if ini < 0:
+        return -1, -1
+    prof = 0
+    en_cadena = escapado = False
+    for i in range(ini, len(texto)):
+        c = texto[i]
+        if en_cadena:
+            if escapado:
+                escapado = False
+            elif c == "\\":
+                escapado = True
+            elif c == '"':
+                en_cadena = False
+            continue
+        if c == '"':
+            en_cadena = True
+        elif c == "{":
+            prof += 1
+        elif c == "}":
+            prof -= 1
+            if prof == 0:
+                return ini, i + 1
+    return ini, -1
+
+def _reparar_json(bloque):
+    """Cierra un objeto truncado: corta en la última coma completa (fuera de cadenas) y
+    pone las llaves que faltan. Así se rescata la meta que sí alcanzó a escribir el
+    modelo — entre ella el `escalar`, que es la que dispara la bandeja de escalados."""
+    prof = prof_corte = 0
+    corte = -1
+    en_cadena = escapado = False
+    for i, c in enumerate(bloque):
+        if en_cadena:
+            if escapado:
+                escapado = False
+            elif c == "\\":
+                escapado = True
+            elif c == '"':
+                en_cadena = False
+            continue
+        if c == '"':
+            en_cadena = True
+        elif c == "{":
+            prof += 1
+        elif c == "}":
+            prof -= 1
+        elif c == "," and prof >= 1:
+            corte, prof_corte = i, prof
+    if corte < 0:
+        return None
     try:
-        return json.loads(m.group(0))
+        return json.loads(bloque[:corte] + "}" * prof_corte, strict=False)
     except json.JSONDecodeError:
-        return {"respuesta": texto, "meta": {}}
+        return None
+
+def _sin_bloque(texto):
+    """El texto sin cercas de código y sin el bloque de metadatos. Es la red de seguridad
+    final: al ciudadano NUNCA le puede llegar el JSON que consume el sistema."""
+    texto = _CERCAS.sub("", texto or "")
+    ini, fin = _bloque_json(texto)
+    if ini >= 0 and ('"respuesta"' in texto[ini:] or '"meta"' in texto[ini:]):
+        texto = texto[:ini] + (texto[fin:] if fin > 0 else "")
+    return texto.strip()
+
+def _salida(respuesta, meta):
+    return {"respuesta": (respuesta or "").strip(), "meta": meta or {}}
+
+def _json_de(texto):
+    """Extrae {respuesta, meta} de lo que devolvió el modelo.
+
+    El modelo a veces envuelve el JSON en cercas, le antepone prosa, o se queda sin
+    tokens a media `meta` y lo deja sin cerrar. Antes, cualquiera de esos casos caía en
+    un fallback que devolvía el texto ENTERO como respuesta, así que al ciudadano le
+    llegaba el bloque de metadatos crudo por WhatsApp. Ahora se degrada por pasos y el
+    bloque se recorta siempre."""
+    texto = (texto or "").strip()
+    ini, fin = _bloque_json(texto)
+    if ini < 0:
+        return _salida(_sin_bloque(texto), {})
+    bloque = texto[ini:fin] if fin > 0 else texto[ini:]
+
+    if fin > 0:                                   # 1) el JSON está completo
+        try:
+            d = json.loads(bloque, strict=False)
+            if isinstance(d, dict) and "respuesta" in d:
+                return _salida(d.get("respuesta"), d.get("meta"))
+        except json.JSONDecodeError:
+            pass
+
+    d = _reparar_json(bloque)                     # 2) truncado: cerrarlo y salvar la meta
+    if isinstance(d, dict) and d.get("respuesta"):
+        print("Modelo devolvió JSON truncado; se reparó y se rescató la meta", flush=True)
+        return _salida(d.get("respuesta"), d.get("meta"))
+
+    m = _RESPUESTA_RE.search(bloque)              # 3) al menos el campo `respuesta`
+    if m:
+        try:
+            rescatada = json.loads('"' + m.group(1) + '"', strict=False)
+        except json.JSONDecodeError:
+            rescatada = None
+        if rescatada:
+            print("Modelo devolvió JSON ilegible; se rescató solo la respuesta", flush=True)
+            return _salida(rescatada, {})
+
+    print("Modelo devolvió algo sin JSON usable; se envía el texto sin el bloque", flush=True)
+    return _salida(_sin_bloque(texto), {})        # 4) el texto, pero sin el bloque
 
 def _contexto_contacto(contacto):
     """Texto corto con lo ya sabido de este número, para no volver a preguntarlo."""
@@ -84,16 +195,28 @@ def _contexto_contacto(contacto):
     return ("Dato ya conocido de este contacto (no se lo vuelvas a preguntar, "
             "solo repítelo en meta si la persona lo reafirma): " + ", ".join(partes) + ".")
 
-def _system_con_contacto(contacto):
+def _bloques_contexto(contacto):
+    """Bloques de system extra: lo que ya se sabe del contacto y, si aplica, el aviso de
+    que un operador humano tuvo el control de esta plática y la acaba de devolver."""
+    bloques = []
     ctx = _contexto_contacto(contacto)
-    if not ctx:
+    if ctx:
+        bloques.append({"type": "text", "text": ctx})
+    nota = (contacto or {}).get("nota_operador")
+    if nota:
+        bloques.append({"type": "text", "text": nota})
+    return bloques
+
+def _system_con_contacto(contacto):
+    extra = _bloques_contexto(contacto)
+    if not extra:
         return SYSTEM
-    return [{"type": "text", "text": SYSTEM}, {"type": "text", "text": ctx}]
+    return [{"type": "text", "text": SYSTEM}] + extra
 
 # ---------- 1) Borrador ----------
 def _borrador(historial, contacto=None):
     resp = cliente.messages.create(
-        model=MODELO_BORRADOR, max_tokens=700, system=_system_con_contacto(contacto),
+        model=MODELO_BORRADOR, max_tokens=MAX_TOKENS, system=_system_con_contacto(contacto),
         messages=historial)
     return _json_de(_texto(resp))
 
@@ -146,10 +269,7 @@ Devuelve SOLO este JSON:
 {"ok": true|false, "problemas": ["..."], "sugerencia": "qué cambiar en concreto"}"""
 
 def _critica(mensaje, borrador, contacto=None):
-    sysblocks = [{"type": "text", "text": CRITICO_SYS}]
-    ctx = _contexto_contacto(contacto)
-    if ctx:
-        sysblocks.append({"type": "text", "text": ctx})
+    sysblocks = [{"type": "text", "text": CRITICO_SYS}] + _bloques_contexto(contacto)
     sysblocks.append({"type": "text",
                        "text": "\n\n===== BASE DE CONOCIMIENTO (todo esto es VERIFICADO) =====\n" + KB_TEXT,
                        "cache_control": {"type": "ephemeral"}})
@@ -166,7 +286,7 @@ def _refinar(historial, borrador, critica, contacto=None):
              f"Indicación: {critica.get('sugerencia','')}\n\n"
              "Reescríbela corrigiendo eso. Devuelve el mismo formato JSON {respuesta, meta}.")
     resp = cliente.messages.create(
-        model=MODELO_BORRADOR, max_tokens=700, system=_system_con_contacto(contacto),
+        model=MODELO_BORRADOR, max_tokens=MAX_TOKENS, system=_system_con_contacto(contacto),
         messages=historial + [{"role": "user", "content": instr}])
     return _json_de(_texto(resp))
 
@@ -223,6 +343,9 @@ def responder(mensaje, historial=None, verbose=False, contacto=None):
         if crit.get("ok"):
             break
         salida = _refinar(historial, salida, crit, contacto)
+    # Último filtro antes de que el texto salga a WhatsApp: si por lo que sea quedó algo
+    # con forma del bloque de metadatos, se recorta. Al ciudadano solo le llega prosa.
+    salida["respuesta"] = _sin_bloque(salida.get("respuesta", ""))
     return salida
 
 if __name__ == "__main__":

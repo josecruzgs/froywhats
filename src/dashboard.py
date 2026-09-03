@@ -15,7 +15,7 @@ from collections import Counter
 from flask import Flask, request, jsonify, Response, g, abort
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import agente, humanizar, green_api
+import agente, humanizar, green_api, intervenciones
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KB = os.path.join(BASE, "knowledge-base")
@@ -204,15 +204,20 @@ def cargar_notas():
 @app.get("/api/stats")
 def api_stats():
     regs = cargar_registros()
-    total = len(regs)
-    tipos = Counter(r.get("tipo") or "otro" for r in regs)
+    # Una CONVERSACIÓN es una persona (un número), no un mensaje: registros.jsonl guarda
+    # una línea por mensaje, así que contar líneas inflaba la tarjeta. Se cuenta igual que
+    # en Explorar y en la bandeja de Escalados, agrupando por número.
+    numeros = {r.get("numero") or "?" for r in regs}
+    escalados = {r.get("numero") or "?" for r in regs if r.get("escalar")}
+    total, escal = len(numeros), len(escalados)
+    tipos = Counter(r.get("tipo") or "otro" for r in regs if r.get("tipo"))
     munis = Counter(r.get("municipio") for r in regs if r.get("municipio"))
     cols = Counter(r.get("colonia") for r in regs if r.get("colonia"))
-    escal = sum(1 for r in regs if r.get("escalar"))
     notas = cargar_notas()
     pend = [a for a in os.listdir(APORTES) if a.endswith(".md")]
     return jsonify({
         "total": total,
+        "mensajes": len(regs),
         "escalados": escal,
         "pct_escalados": round(100 * escal / total) if total else 0,
         "municipios_alcanzados": len(munis),
@@ -359,6 +364,89 @@ def api_escalados_atender():
     return jsonify({"ok": True})
 
 # ---------- API: explorar y exportar ----------
+def _hilo(regs):
+    """Registros de una persona como burbujas para el chat del modal. `quien` dice de dónde
+    salió la respuesta: el agente o un operador que tomó el control."""
+    return [{"fecha": (r.get("fecha") or "")[:16].replace("T", " "),
+             "mensaje": r.get("mensaje", "") or "", "respuesta": r.get("respuesta", "") or "",
+             "tipo": r.get("tipo"),
+             "quien": "operador" if r.get("operador") else "agente",
+             "operador": r.get("operador")} for r in regs]
+
+# ---------- API: toma de control humano de una conversación ----------
+def _puede_operar():
+    if getattr(g, "rol", None) not in ("admin", "coordinador"):
+        abort(403)
+
+def _contacto_de(numero):
+    for c in listar_contactos():
+        if c["numero"] == numero:
+            return c
+    return {"numero": numero}
+
+def _paquete_intervencion(numero):
+    """Todo lo que el modal necesita en una sola llamada: ficha del contacto, hilo del
+    chat y estado del control. Se pide en bucle mientras el operador está atendiendo."""
+    st = intervenciones.estado(numero)
+    regs = [r for r in cargar_registros() if (r.get("numero") or "?") == numero]
+    regs.sort(key=lambda r: r.get("fecha") or "")
+    return {"numero": numero, "contacto": _contacto_de(numero), "historial": _hilo(regs),
+            "intervencion": {"activa": bool(st),
+                             "operador": st["operador"] if st else None,
+                             "mio": bool(st) and st["operador"] == getattr(g, "usuario", ""),
+                             "restante_seg": st["restante_seg"] if st else 0},
+            "minutos": intervenciones.MINUTOS_DEFAULT,
+            "puede_operar": getattr(g, "rol", None) in ("admin", "coordinador")}
+
+@app.get("/api/intervencion")
+def api_intervencion_estado():
+    numero = (request.args.get("numero") or "").strip()
+    if not numero:
+        return jsonify({"error": "falta el número"}), 400
+    return jsonify(_paquete_intervencion(numero))
+
+@app.post("/api/intervencion/tomar")
+def api_intervencion_tomar():
+    _puede_operar()
+    d = request.get_json(force=True) or {}
+    numero = (d.get("numero") or "").strip()
+    if not numero or numero == "prueba":
+        return jsonify({"error": "número inválido"}), 400
+    intervenciones.tomar(numero, getattr(g, "usuario", "operador"), d.get("minutos"))
+    return jsonify(_paquete_intervencion(numero))
+
+@app.post("/api/intervencion/soltar")
+def api_intervencion_soltar():
+    _puede_operar()
+    numero = ((request.get_json(force=True) or {}).get("numero") or "").strip()
+    if not numero:
+        return jsonify({"error": "falta el número"}), 400
+    intervenciones.soltar(numero)
+    return jsonify(_paquete_intervencion(numero))
+
+@app.post("/api/intervencion/mensaje")
+def api_intervencion_mensaje():
+    _puede_operar()
+    d = request.get_json(force=True) or {}
+    numero = (d.get("numero") or "").strip()
+    texto = (d.get("texto") or "").strip()
+    if not numero or not texto:
+        return jsonify({"error": "falta el número o el mensaje"}), 400
+    st = intervenciones.estado(numero)
+    if not st:
+        return jsonify({"error": "ya no tienes el control de este chat"}), 409
+    if st["operador"] != getattr(g, "usuario", ""):
+        return jsonify({"error": "el control lo tiene " + st["operador"]}), 409
+    canal = (_contacto_de(numero) or {}).get("canal") or ""
+    with intervenciones.lock(numero):  # que no se cruce con un mensaje que esté entrando
+        ok, detalle = intervenciones.enviar(numero, texto, canal)
+        if not ok:
+            return jsonify({"error": "no se pudo enviar: " + detalle}), 502
+        intervenciones.registrar(numero, respuesta=texto, origen=detalle + "-operador",
+                                 operador=getattr(g, "usuario", ""), extra={"intervenido": True})
+        intervenciones.historial_append(numero, "assistant", texto)
+    return jsonify(_paquete_intervencion(numero))
+
 @app.get("/api/conversaciones")
 def api_conversaciones():
     """Conversaciones agrupadas por número: una fila por usuario (con su mensaje más
@@ -366,6 +454,7 @@ def api_conversaciones():
     q = (request.args.get("q") or "").lower().strip()
     tipo = request.args.get("tipo") or ""
     nombres = {c["numero"]: c.get("nombre") for c in listar_contactos()}
+    intervenidos = set(intervenciones.activas())
     grupos = {}
     for r in cargar_registros():
         num = r.get("numero") or "?"
@@ -395,10 +484,9 @@ def api_conversaciones():
             "escalar": any(r.get("escalar") for r in regs),
             "jornada": any(r.get("jornada") for r in regs),
             "origen": ultimo.get("origen"),
+            "intervenida": num in intervenidos,
             "n": len(regs),
-            "historial": [{"fecha": (r.get("fecha") or "")[:16].replace("T", " "),
-                           "mensaje": r.get("mensaje", ""), "respuesta": r.get("respuesta", ""),
-                           "tipo": r.get("tipo")} for r in regs],
+            "historial": _hilo(regs),
         })
     out.sort(key=lambda x: x["fecha"], reverse=True)
     return jsonify({"total": len(out), "items": out})
@@ -961,6 +1049,23 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .modal.hide{display:none}
 .modalbox{background:#fff;border-radius:20px;padding:22px;width:min(480px,94vw);max-height:92vh;overflow:auto;box-shadow:0 30px 60px rgba(0,0,0,.3)}
 .modalbox.wide{width:min(640px,94vw)}
+.modalbox.xl{width:min(940px,96vw)}
+/* modal de operador: ficha del contacto + chat + barra de control */
+.opshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+.opsgrid{display:grid;grid-template-columns:250px 1fr;gap:16px;align-items:start}
+.ficha{background:#faf8f7;border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.ficha .fr{padding:7px 0;border-bottom:1px solid var(--line)}
+.ficha .fr:last-child{border-bottom:0}
+.ficha .fl{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
+.ficha .fv{font-size:13.5px;word-break:break-word}
+.opsbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.cuenta{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px;color:var(--guinda)}
+.b.op{background:#fff3e0;color:#7a4a06;margin-left:auto;border-top-right-radius:3px;border:1px solid #f2d9ab}
+.opwho{display:block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;opacity:.7;margin-bottom:3px}
+.opsend{display:flex;gap:8px;align-items:flex-end;margin-top:10px}
+.opsend textarea{min-height:44px;max-height:120px;margin:0!important}
+.opsend button{flex:none;white-space:nowrap}
+@media(max-width:760px){.opsgrid{grid-template-columns:1fr}}
 .modalbox label{font-size:12px;font-weight:700;color:#8a93a6;display:block;margin:10px 0 3px}
 select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a93a6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:32px!important}
 .sidetoggle{display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;border:0;background:#f2efed;color:var(--ink);cursor:pointer;margin-bottom:14px;flex-shrink:0}
@@ -1142,7 +1247,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
     <!-- EXPLORAR -->
     <section id="explorar" class="hide">
-      <h1>Explorar conversaciones</h1><div class="sub">Agrupado por usuario — busca, filtra y exporta <span class="tag" id="ex-count"></span></div>
+      <h1>Explorar conversaciones</h1><div class="sub">Agrupado por usuario — abre una para ver la ficha del contacto y, si hace falta, tomar el control y contestar tú <span class="tag" id="ex-count"></span></div>
       <div class="card c4">
         <div class="barbusq">
           <input id="ex-q" placeholder="Buscar en mensajes, colonia, municipio…" onkeydown="if(event.key==='Enter')cargarExplorar()">
@@ -1152,7 +1257,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
         </div>
         <div class="tablewrap">
         <table class="ctable">
-          <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th><th>Jornada</th></tr></thead>
+          <thead><tr><th>Fecha</th><th>Nombre</th><th>Número</th><th>Tipo</th><th>Ubicación</th><th>Último mensaje</th><th>Msjs</th><th>Estado</th></tr></thead>
           <tbody id="ex-body"><tr><td colspan="8"><span class="muted">Cargando…</span></td></tr></tbody>
         </table>
         </div>
@@ -1322,10 +1427,35 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
   </div>
 </div>
 <div id="exmodal" class="modal hide">
-  <div class="modalbox wide">
-    <div class="h" style="font-size:16px;margin-bottom:4px" id="ex-modal-title">Historial de conversación</div>
-    <div class="chat" id="ex-modal-chat" style="height:50vh"></div>
-    <div style="margin-top:14px"><button class="ghost" onclick="cerrarExplorarModal()">Cerrar</button></div>
+  <div class="modalbox xl">
+    <div class="opshead">
+      <div>
+        <div class="h" style="font-size:16px;margin-bottom:2px" id="ex-modal-title">Historial de conversación</div>
+        <div class="muted" style="font-size:12px" id="ex-modal-sub"></div>
+      </div>
+      <span class="chip st ok" id="ex-estado">Contesta el agente</span>
+    </div>
+    <div class="opsgrid">
+      <div class="ficha" id="ex-ficha"></div>
+      <div>
+        <div class="chat" id="ex-modal-chat" style="height:44vh"></div>
+        <div id="ex-envio" class="hide">
+          <div class="opsend">
+            <textarea id="ex-txt" rows="2" placeholder="Escribe tu respuesta como operador…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();enviarComoOperador();}"></textarea>
+            <button class="b1" id="ex-enviar" onclick="enviarComoOperador()">Enviar</button>
+          </div>
+          <div class="flash" id="ex-flash"></div>
+        </div>
+      </div>
+    </div>
+    <div class="opsbar">
+      <button class="b1" id="ex-tomar" onclick="tomarControl()">Tomar el control</button>
+      <button class="ghost hide" id="ex-extender" onclick="tomarControl()">Otros 30 min</button>
+      <button class="ghost hide" id="ex-soltar" onclick="soltarControl()">Devolver al agente</button>
+      <span id="ex-cuenta" class="cuenta"></span>
+      <a class="ghost" id="ex-wa" target="_blank" style="text-decoration:none;display:none">Abrir en WhatsApp</a>
+      <button class="ghost" onclick="cerrarExplorarModal()" style="margin-left:auto">Cerrar</button>
+    </div>
   </div>
 </div>
 <div id="pwmodal" class="modal hide">
@@ -1385,7 +1515,12 @@ const ICONS={
 };
 const COLICONS={porhacer:ICONS.pin,proceso:ICONS.clock,hecho:ICONS.check,evidencia:ICONS.camera};
 const $=s=>document.querySelector(s), autor=()=>document.querySelector('#autor').value||'anónimo';
-document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.add('hide');}));
+// clic en el fondo = cerrar. El de Explorar pasa por su función para además cortar el
+// bucle que consulta la conversación mientras un operador la está atendiendo.
+document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{
+  if(e.target!==m)return;
+  if(m.id==='exmodal')cerrarExplorarModal(); else m.classList.add('hide');
+}));
 let ROL='admin';
 const LOADERS={resumen:cargarStats,seguimiento:cargarSeguimiento,mapa:cargarMapa,tendencias:cargarTendencias,escalados:cargarEscalados,redes:cargarRedes,explorar:cargarExplorar,contactos:cargarContactos,pruebas:cargarKB,alimentar:cargarPendientes,notas:cargarNotas,auditoria:cargarAuditoria,conexion:cargarConexion,usuarios:cargarUsuarios};
 const TABS=Object.keys(LOADERS);
@@ -1413,8 +1548,8 @@ function chipJornada(v){return v?'<span class="chip jornada">jornada</span>':'';
 async function cargarStats(){
   const s=await(await fetch('/api/stats')).json();
   $('#cards').innerHTML=`
-   <div class="card stat featured"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Conversaciones</div><div class="num">${s.total}</div><span class="pill up">${ICONS.up} ${s.municipios_alcanzados} municipios</span></div>
-   <div class="card stat"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Escalados</div><div class="num">${s.escalados}</div><span class="pill warn">${s.pct_escalados}% del total</span></div>
+   <div class="card stat featured"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Conversaciones</div><div class="num">${s.total}</div><span class="pill up">${ICONS.up} ${s.mensajes} mensajes · ${s.municipios_alcanzados} municipios</span></div>
+   <div class="card stat"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Escalados</div><div class="num">${s.escalados}</div><span class="pill warn">${s.pct_escalados}% de las conversaciones</span></div>
    <div class="card stat"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Notas de mejora</div><div class="num">${s.notas}</div></div>
    <div class="card stat"><div class="statbtn">${ICONS.arrowup}</div><div class="lbl">Aportes pendientes</div><div class="num">${s.aportes_pendientes}</div></div>`;
   const max=Math.max(1,...s.por_tipo.map(x=>x[1]));
@@ -1529,7 +1664,7 @@ function renderExplorar(){
       <td>${[x.colonia,x.municipio].filter(Boolean).join(', ')||'<span class="muted">—</span>'}</td>
       <td>${msj}</td>
       <td>${x.n}</td>
-      <td>${chipJornada(x.jornada)}</td>
+      <td>${chipJornada(x.jornada)}${x.intervenida?' <span class="chip st">operador</span>':''}</td>
     </tr>`;
   }).join(''):'<tr><td colspan="8"><span class="muted">Sin resultados</span></td></tr>';
   $('#ex-pager').innerHTML=total?(
@@ -1538,20 +1673,134 @@ function renderExplorar(){
     '<button class="ghost" '+(_exPage>=totalPaginas?'disabled':'')+' onclick="exIrPagina('+(_exPage+1)+')">Siguiente →</button>'
   ):'';
 }
+// --- modal de conversación con toma de control humano ---
+// El operador puede quitarle el chat al agente por 30 min y contestar a mano. Mientras
+// dure, el modal consulta al servidor cada pocos segundos (los mensajes nuevos llegan por
+// el webhook, que es otro proceso) y lleva su propio contador regresivo.
+const OPS_POLL_MS=5000;
+let _exNum=null, _exPoll=null, _exTick=null, _exRestante=0, _exMio=false, _exPuedo=false;
+const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const mmss=s=>{s=Math.max(0,Math.round(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');};
+
 function abrirExplorarModal(numero){
-  const x=_explorarCache[numero]; if(!x)return;
-  $('#ex-modal-title').innerHTML='Historial · '+(x.nombre?(x.nombre+' · '+numero):numero).replace(/</g,'&lt;')+(x.jornada?' '+chipJornada(true):'');
-  const chat=$('#ex-modal-chat');
-  chat.innerHTML=(x.historial||[]).map(h=>{
-    let html=`<div class="muted" style="font-size:10.5px;text-align:center;margin:8px 0 2px">${h.fecha}${h.tipo?(' · '+h.tipo):''}</div>`;
-    if(h.mensaje)html+=`<div class="b bot">${h.mensaje.replace(/</g,'&lt;')}</div>`;
-    if(h.respuesta)html+=`<div class="b yo">${h.respuesta.replace(/</g,'&lt;')}</div>`;
-    return html;
-  }).join('');
+  _exNum=numero;
+  const x=_explorarCache[numero]||{numero};
+  $('#ex-modal-title').innerHTML='Conversación · '+esc(x.nombre?(x.nombre+' · '+numero):numero)+(x.jornada?' '+chipJornada(true):'');
+  $('#ex-modal-sub').textContent='Cargando ficha del contacto…';
+  $('#ex-modal-chat').innerHTML='<div class="muted" style="padding:10px">Cargando…</div>';
+  $('#ex-ficha').innerHTML='';
+  $('#ex-flash').textContent='';
+  $('#ex-txt').value='';
   $('#exmodal').classList.remove('hide');
-  chat.scrollTop=chat.scrollHeight;
+  refrescarConversacion(true);
+  clearInterval(_exPoll); _exPoll=setInterval(()=>refrescarConversacion(false),OPS_POLL_MS);
+  clearInterval(_exTick); _exTick=setInterval(tickControl,1000);
 }
-function cerrarExplorarModal(){$('#exmodal').classList.add('hide');}
+function cerrarExplorarModal(){
+  $('#exmodal').classList.add('hide');
+  clearInterval(_exPoll); clearInterval(_exTick); _exPoll=_exTick=null; _exNum=null;
+}
+async function refrescarConversacion(irAlFinal){
+  if(!_exNum)return;
+  let d; try{ d=await(await fetch('/api/intervencion?numero='+encodeURIComponent(_exNum),{cache:'no-store'})).json(); }
+  catch(e){ return; }
+  if(!_exNum||d.numero!==_exNum)return;   // el operador cerró o cambió de chat mientras cargaba
+  _exPuedo=!!d.puede_operar;
+  pintarFicha(d.contacto||{});
+  pintarHilo(d.historial||[],irAlFinal);
+  pintarControl(d.intervencion||{},d.minutos||30);
+}
+function pintarFicha(c){
+  const p=c.postura||'sin_datos';
+  const fecha=v=>(v||'').slice(0,16).replace('T',' ')||'—';
+  const fr=(l,v)=>`<div class="fr"><div class="fl">${l}</div><div class="fv">${v}</div></div>`;
+  const dato=v=>v?esc(v):'<span class="muted">Sin datos</span>';
+  $('#ex-ficha').innerHTML=
+    fr('Nombre', dato(c.nombre)) +
+    fr('Número', esc(c.numero||'')) +
+    fr('Ciudad', dato(c.ciudad)) +
+    fr('Colonia', dato(c.colonia)) +
+    fr('Tema', dato(c.tema)) +
+    fr('Postura', `<span class="postura ${p}">${POSTURA_LBL[p]||p}</span>`) +
+    fr('Jornada', c.jornada?chipJornada(true):'<span class="muted">No</span>') +
+    fr('Canal', dato(c.canal)) +
+    fr('Mensajes', c.mensajes||0) +
+    fr('Primer contacto', fecha(c.primera_vez)) +
+    fr('Última actividad', fecha(c.actualizado_en));
+  $('#ex-modal-sub').textContent=[c.colonia,c.ciudad].filter(Boolean).join(', ')||'Sin ubicación capturada';
+  const tel=(c.numero||'').replace(/[^0-9]/g,''), wa=$('#ex-wa');
+  if(tel&&c.numero!=='prueba'){wa.style.display='inline-flex';wa.href='https://wa.me/'+tel;wa.textContent='Abrir en WhatsApp';}
+  else wa.style.display='none';
+}
+function pintarHilo(hist,irAlFinal){
+  const chat=$('#ex-modal-chat');
+  const abajo=irAlFinal||(chat.scrollHeight-chat.scrollTop-chat.clientHeight<60);
+  chat.innerHTML=hist.length?hist.map(h=>{
+    let html=`<div class="muted" style="font-size:10.5px;text-align:center;margin:8px 0 2px">${esc(h.fecha)}${h.tipo?(' · '+esc(h.tipo)):''}</div>`;
+    if(h.mensaje)html+=`<div class="b bot">${esc(h.mensaje)}</div>`;
+    if(h.respuesta)html+=(h.quien==='operador')
+      ? `<div class="b op"><span class="opwho">${esc(h.operador||'operador')}</span>${esc(h.respuesta)}</div>`
+      : `<div class="b yo">${esc(h.respuesta)}</div>`;
+    return html;
+  }).join(''):'<div class="muted" style="padding:10px">Sin mensajes todavía.</div>';
+  if(abajo)chat.scrollTop=chat.scrollHeight;
+}
+function pintarControl(iv,minutos){
+  _exMio=!!iv.mio;
+  _exRestante=iv.activa?(iv.restante_seg||0):0;
+  const chip=$('#ex-estado');
+  chip.className='chip st'+(iv.activa?'':' ok');
+  chip.textContent=iv.activa?(iv.mio?'Tú tienes el control':('Lo atiende '+iv.operador)):'Contesta el agente';
+  $('#ex-tomar').classList.toggle('hide',!(_exPuedo&&!iv.activa));
+  $('#ex-tomar').textContent='Tomar el control ('+minutos+' min)';
+  $('#ex-extender').classList.toggle('hide',!(_exPuedo&&iv.mio));
+  $('#ex-extender').textContent='Otros '+minutos+' min';
+  $('#ex-soltar').classList.toggle('hide',!(_exPuedo&&iv.activa));
+  $('#ex-envio').classList.toggle('hide',!(_exPuedo&&iv.mio));
+  if(!iv.activa)$('#ex-flash').textContent='';
+  tickControl();
+}
+function tickControl(){
+  const c=$('#ex-cuenta'); if(!c)return;
+  if(_exRestante<=0){ c.textContent=''; return; }
+  _exRestante--;
+  c.textContent='⏱ '+mmss(_exRestante)+(_exMio?' para que el agente retome':'');
+  if(_exRestante<=0)refrescarConversacion(false);   // se acabó el plazo: confirmar con el servidor
+}
+async function tomarControl(){
+  if(!_exNum)return;
+  const d=await(await fetch('/api/intervencion/tomar',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({numero:_exNum})})).json();
+  if(d.error){$('#ex-flash').textContent='⚠ '+d.error;return;}
+  pintarControl(d.intervencion||{},d.minutos||30);
+  pintarHilo(d.historial||[],true);
+  $('#ex-txt').focus();
+  cargarExplorar();
+}
+async function soltarControl(){
+  if(!_exNum)return;
+  const d=await(await fetch('/api/intervencion/soltar',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({numero:_exNum})})).json();
+  if(d.error){$('#ex-flash').textContent='⚠ '+d.error;return;}
+  pintarControl(d.intervencion||{},d.minutos||30);
+  cargarExplorar();
+}
+async function enviarComoOperador(){
+  const txt=$('#ex-txt'), btn=$('#ex-enviar'), flash=$('#ex-flash');
+  const texto=txt.value.trim();
+  if(!_exNum||!texto)return;
+  btn.disabled=true; flash.textContent='Enviando…';
+  let d; try{
+    d=await(await fetch('/api/intervencion/mensaje',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({numero:_exNum,texto})})).json();
+  }catch(e){ d={error:'no hubo respuesta del servidor'}; }
+  btn.disabled=false;
+  if(d.error){flash.textContent='⚠ '+d.error;refrescarConversacion(false);return;}
+  flash.textContent='✓ enviado';
+  txt.value='';
+  pintarHilo(d.historial||[],true);
+  pintarControl(d.intervencion||{},d.minutos||30);
+}
 // --- contactos ---
 const POSTURA_LBL={simpatizante:'Simpatizante',neutral:'Neutral',opositor:'Opositor',sin_datos:'Sin datos'};
 const CT_POR_PAGINA=15;
