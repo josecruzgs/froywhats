@@ -27,6 +27,7 @@ NOTAS = os.path.join(DATA, "notas_mejora.jsonl")
 REGISTROS = os.path.join(DATA, "registros.jsonl")
 USUARIOS_F = os.path.join(DATA, "usuarios.json")
 ESCAL_F = os.path.join(DATA, "escalados_atendidos.json")
+CASOS_F = os.path.join(DATA, "casos_seguimiento.json")
 AUDITORIA_F = os.path.join(DATA, "auditoria.jsonl")
 ACCIONES_F = os.path.join(DATA, "acciones_digitales.json")
 META_F = os.path.join(DATA, "meta_seguimiento.json")
@@ -190,6 +191,53 @@ def cargar_registros():
                 except: pass
     return regs
 
+def _tipo_dominante(tipos):
+    """El tipo que mejor describe una conversación: el más repetido, sin dejar que
+    'otro' (saludos, despedidas, agradecimientos) tape la petición real del ciudadano."""
+    if not tipos:
+        return "otro"
+    reales = {k: v for k, v in tipos.items() if k != "otro"}
+    return max(reales or tipos, key=lambda k: tipos[k])
+
+def resumir_conversaciones(regs=None):
+    """Colapsa registros.jsonl (una línea por MENSAJE) en una fila por CONVERSACIÓN.
+
+    El panel habla de conversaciones, no de mensajes: un chat de 20 mensajes desde
+    Hermosillo es UNA conversación de Hermosillo, no 20. Contar líneas inflaba las
+    barras de tipo, los top de municipio/colonia y el mapa. De cada número se queda con
+    la última ubicación capturada, el tipo dominante, si alguna vez escaló, los días con
+    actividad y el texto completo (para los temas de Tendencias)."""
+    convs = {}
+    for r in (cargar_registros() if regs is None else regs):
+        num = r.get("numero") or "?"
+        c = convs.get(num)
+        if c is None:
+            c = convs[num] = {"numero": num, "mensajes": 0, "tipos": Counter(),
+                              "municipio": None, "colonia": None, "escalar": False,
+                              "dias": set(), "texto": [], "fecha": "", "temas": []}
+        c["mensajes"] += 1
+        if r.get("tipo"):
+            c["tipos"][r["tipo"]] += 1
+        if r.get("municipio"):
+            c["municipio"] = r["municipio"]
+        if r.get("colonia"):
+            c["colonia"] = r["colonia"]
+        if r.get("escalar"):
+            c["escalar"] = True
+        dia = (r.get("fecha") or "")[:10]
+        if dia:
+            c["dias"].add(dia)
+        if (r.get("fecha") or "") > c["fecha"]:
+            c["fecha"] = r.get("fecha") or ""
+        for t in (r.get("tema"), r.get("motivo_escalamiento")):
+            if t and t not in c["temas"]:
+                c["temas"].append(t)
+        c["texto"].append(((r.get("mensaje") or "") + " " + (r.get("tema") or "")).lower())
+    for c in convs.values():
+        c["tipo"] = _tipo_dominante(c["tipos"])
+        c["texto"] = " ".join(c["texto"])
+    return list(convs.values())
+
 def cargar_notas():
     notas = []
     if os.path.exists(NOTAS):
@@ -204,15 +252,16 @@ def cargar_notas():
 @app.get("/api/stats")
 def api_stats():
     regs = cargar_registros()
-    # Una CONVERSACIÓN es una persona (un número), no un mensaje: registros.jsonl guarda
-    # una línea por mensaje, así que contar líneas inflaba la tarjeta. Se cuenta igual que
-    # en Explorar y en la bandeja de Escalados, agrupando por número.
-    numeros = {r.get("numero") or "?" for r in regs}
-    escalados = {r.get("numero") or "?" for r in regs if r.get("escalar")}
-    total, escal = len(numeros), len(escalados)
-    tipos = Counter(r.get("tipo") or "otro" for r in regs if r.get("tipo"))
-    munis = Counter(r.get("municipio") for r in regs if r.get("municipio"))
-    cols = Counter(r.get("colonia") for r in regs if r.get("colonia"))
+    # TODO en esta pantalla se mide por CONVERSACIÓN (un número), no por mensaje:
+    # registros.jsonl guarda una línea por mensaje, así que contar líneas inflaba tanto
+    # la tarjeta como las barras de tipo y los top de municipio/colonia. Se agrupa igual
+    # que en Explorar y en la bandeja de Escalados.
+    convs = resumir_conversaciones(regs)
+    total = len(convs)
+    escal = sum(1 for c in convs if c["escalar"])
+    tipos = Counter(c["tipo"] for c in convs)
+    munis = Counter(c["municipio"] for c in convs if c["municipio"])
+    cols = Counter(c["colonia"] for c in convs if c["colonia"])
     notas = cargar_notas()
     pend = [a for a in os.listdir(APORTES) if a.endswith(".md")]
     return jsonify({
@@ -246,23 +295,24 @@ TOPICOS = {
 
 @app.get("/api/tendencias")
 def api_tendencias():
-    regs = cargar_registros()
+    # También por conversación: un chat que repite "agua" en 15 mensajes es UNA
+    # conversación sobre agua, no 15, y cuenta una sola vez en cada día que estuvo activa.
+    convs = resumir_conversaciones()
     conteo = {}
-    for r in regs:
-        txt = ((r.get("mensaje", "") or "") + " " + (r.get("tema", "") or "")).lower()
+    for c in convs:
         for tema, kws in TOPICOS.items():
-            if any(k in txt for k in kws):
+            if any(k in c["texto"] for k in kws):
                 conteo[tema] = conteo.get(tema, 0) + 1
     temas = sorted(conteo.items(), key=lambda x: -x[1])
     # serie de los últimos 14 días (incluye días en cero)
     hoy = datetime.date.today()
     dias = [hoy - datetime.timedelta(days=i) for i in range(13, -1, -1)]
     porfecha = {}
-    for r in regs:
-        f = (r.get("fecha") or "")[:10]
-        porfecha[f] = porfecha.get(f, 0) + 1
+    for c in convs:
+        for f in c["dias"]:
+            porfecha[f] = porfecha.get(f, 0) + 1
     serie = [{"dia": d.strftime("%d/%m"), "total": porfecha.get(d.isoformat(), 0)} for d in dias]
-    return jsonify({"temas": temas, "serie": serie, "total": len(regs)})
+    return jsonify({"temas": temas, "serie": serie, "total": len(convs)})
 
 # ---------- API: mapa georreferenciado ----------
 def _norm(s):
@@ -313,7 +363,8 @@ COORDS = {
 
 @app.get("/api/mapa")
 def api_mapa():
-    c = Counter(r.get("municipio") for r in cargar_registros() if r.get("municipio"))
+    # el globo del mapa dice "N conversaciones", así que se cuentan números, no mensajes
+    c = Counter(x["municipio"] for x in resumir_conversaciones() if x["municipio"])
     puntos, sin = [], []
     for m, n in c.items():
         co = COORDS.get(_norm(m))
@@ -362,6 +413,90 @@ def api_escalados_atender():
     atend.discard(num) if num in atend else atend.add(num)
     json.dump(sorted(atend), open(ESCAL_F, "w"))
     return jsonify({"ok": True})
+
+# ---------- API: tablero de casos (Seguimiento) ----------
+# Un CASO es una conversación que pidió seguimiento y que el equipo empuja por fases hasta
+# cerrarla. La fase vive en casos_seguimiento.json (por número); lo que ya estaba marcado
+# como atendido en la bandeja de Escalados entra directo como resuelto, y mover una tarjeta
+# a "Resuelto" también lo marca allá para que las dos vistas no se contradigan.
+FASES = [("nuevo", "Nuevo"), ("seguimiento", "En seguimiento"),
+         ("canalizado", "Canalizado"), ("resuelto", "Resuelto")]
+FASE_KEYS = {k for k, _ in FASES}
+
+def cargar_casos():
+    if os.path.exists(CASOS_F):
+        try: return json.load(open(CASOS_F))
+        except: return {}
+    return {}
+
+def guardar_casos(c):
+    json.dump(c, open(CASOS_F, "w"), ensure_ascii=False, indent=2)
+
+def _hace(iso):
+    """'hace 3 d' para la tarjeta: cuánto lleva el caso sin movimiento."""
+    try:
+        f = datetime.datetime.fromisoformat((iso or "")[:19])
+    except ValueError:
+        return ""
+    seg = (datetime.datetime.now() - f).total_seconds()
+    if seg < 3600: return "hace %d min" % max(1, int(seg // 60))
+    if seg < 86400: return "hace %d h" % int(seg // 3600)
+    return "hace %d d" % int(seg // 86400)
+
+@app.get("/api/casos")
+def api_casos():
+    guardadas = cargar_casos()
+    atendidos = _cargar_set(ESCAL_F)
+    perfiles = {c["numero"]: c for c in listar_contactos()}
+    operando = set(intervenciones.activas())
+    items = []
+    for c in resumir_conversaciones():
+        num = c["numero"]
+        guardado = guardadas.get(num) or {}
+        # solo entran las que el agente marcó para seguimiento (o las que alguien ya movió)
+        if not c["escalar"] and not guardado:
+            continue
+        fase = guardado.get("fase") or ("resuelto" if num in atendidos else "nuevo")
+        if fase not in FASE_KEYS:
+            fase = "nuevo"
+        perfil = perfiles.get(num) or {}
+        items.append({"numero": num, "nombre": perfil.get("nombre"), "fase": fase,
+                      "postura": perfil.get("postura"),
+                      "tipo": c["tipo"], "tema": ", ".join(c["temas"][:2]),
+                      "municipio": c["municipio"], "colonia": c["colonia"],
+                      "mensajes": c["mensajes"], "hace": _hace(c["fecha"]),
+                      "fecha": (c["fecha"] or "")[:16].replace("T", " "),
+                      "intervenida": num in operando,
+                      "movido_por": guardado.get("por"), "movido_en": guardado.get("actualizado_en")})
+    items.sort(key=lambda x: x["fecha"], reverse=True)
+    resueltos = sum(1 for x in items if x["fase"] == "resuelto")
+    zonas = Counter(x["municipio"] for x in items if x["municipio"])
+    return jsonify({
+        "columnas": [{"key": k, "titulo": t, "items": [x for x in items if x["fase"] == k]}
+                     for k, t in FASES],
+        "total": len(items), "resueltos": resueltos,
+        "pct": round(100 * resueltos / len(items)) if items else 0,
+        "por_zona": zonas.most_common(6),
+        "minutos": intervenciones.MINUTOS_DEFAULT,
+        "puede_operar": getattr(g, "rol", None) in ("admin", "coordinador"),
+    })
+
+@app.post("/api/casos/fase")
+def api_casos_fase():
+    d = request.get_json(force=True) or {}
+    num, fase = (d.get("numero") or "").strip(), d.get("fase")
+    if not num:
+        return jsonify({"error": "falta el número"}), 400
+    if fase not in FASE_KEYS:
+        return jsonify({"error": "fase inválida"}), 400
+    casos = cargar_casos()
+    casos[num] = {"fase": fase, "por": getattr(g, "usuario", ""),
+                  "actualizado_en": datetime.datetime.now().isoformat(timespec="minutes")}
+    guardar_casos(casos)
+    atend = _cargar_set(ESCAL_F)     # que la bandeja de Escalados diga lo mismo
+    atend.add(num) if fase == "resuelto" else atend.discard(num)
+    json.dump(sorted(atend), open(ESCAL_F, "w"))
+    return jsonify({"ok": True, "fase": fase})
 
 # ---------- API: explorar y exportar ----------
 def _hilo(regs):
@@ -628,7 +763,7 @@ def ver_evidencia(nombre):
         abort(404)
     return send_file(ruta)
 
-# ---------- API: seguimiento (tablero Kanban) ----------
+# ---------- API: kanban de publicaciones (vive en la pestaña Redes) ----------
 COLS = [("porhacer", "Por hacer"), ("proceso", "En proceso"),
         ("hecho", "Hecho"), ("evidencia", "Con evidencia")]
 COL_KEYS = {k for k, _ in COLS}
@@ -675,8 +810,8 @@ def api_meta_set():
     json.dump(m, open(META_F, "w"), ensure_ascii=False)
     return jsonify({"ok": True})
 
-@app.get("/api/seguimiento")
-def api_seguimiento():
+@app.get("/api/publicaciones")
+def api_publicaciones():
     acc = [_norm_accion(x) for x in cargar_acciones()]
     columnas = [{"key": k, "titulo": t, "items": [x for x in acc if x.get("columna") == k]}
                 for k, t in COLS]
@@ -1010,7 +1145,8 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 #mapa-canvas{height:62vh;border-radius:16px;z-index:1}
 .aporte.done{opacity:.55}
 .barbusq{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}.barbusq input{flex:1;min-width:160px}.barbusq select{width:auto}
-#kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;align-items:start}
+#kanban,#tablero{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;align-items:start}
+.aviso{background:#eaf7ef;border:1px solid #cfeadb;color:#1c5b3a;border-radius:14px;padding:12px 15px;font-size:13px;line-height:1.5;margin:16px 0}
 .kcol{background:#f4f6fb;border-radius:14px;padding:10px;min-height:120px;transition:.12s}
 .kcol.over{outline:2px dashed var(--g1);background:#e8f8ee}
 .kcol h4{margin:0 0 8px;font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
@@ -1018,7 +1154,7 @@ input:disabled{background:#f2f0ee!important;color:#a39992;cursor:not-allowed}
 .kcard:active{cursor:grabbing}
 .progbar{height:14px;background:#f0f2f8;border-radius:10px;overflow:hidden}
 .progbar>div{height:100%;background:linear-gradient(90deg,var(--g1),var(--g2));transition:.3s}
-@media(max-width:640px){#kanban{grid-template-columns:1fr}}
+@media(max-width:640px){#kanban,#tablero{grid-template-columns:1fr}}
 /* tarjetas de redes / kanban bonitas */
 .rcard{background:#fff;border-radius:18px;box-shadow:0 4px 14px rgba(30,20,15,.05);margin-bottom:12px;border:1px solid var(--line);transition:.15s;padding:16px 18px}
 .rcard:hover{box-shadow:0 8px 22px rgba(30,20,15,.09)}
@@ -1157,7 +1293,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <h1>Resumen</h1><div class="sub">Estadísticas y segmentación territorial de las conversaciones</div>
       <div class="bento" id="cards"></div>
       <div class="bento" style="margin-top:18px">
-        <div class="card c2"><div class="h">Tipo de mensaje</div><div id="tipos"></div></div>
+        <div class="card c2"><div class="h">Tipo de conversación</div><div id="tipos"></div></div>
         <div class="card c2"><div class="h">Escalados a coordinador</div>
           <div style="display:flex;gap:18px;align-items:center">
             <div class="donut" id="donut"><div class="inner"><div><b id="dpct" style="font-size:24px">0%</b><br><span class="muted">escalado</span></div></div></div>
@@ -1292,25 +1428,23 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 
     <!-- SEGUIMIENTO (kanban de publicaciones) -->
     <section id="seguimiento" class="hide">
-      <h1>Seguimiento</h1><div class="sub">Tablero de publicaciones — arrastra o usa ◀ ▶ para mover el estado</div>
+      <h1>Seguimiento</h1><div class="sub">Tablero de casos — mueve con ◀ ▶ o toma la conversación</div>
       <div class="bento">
-        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>Meta y avance</div>
-          <div class="progbar"><div id="seg-bar" style="width:0"></div></div>
-          <div class="muted" id="seg-metanum" style="margin-top:8px"></div>
-          <div id="seg-metaform" style="margin-top:10px">
-            <div class="barbusq"><input id="seg-mtexto" placeholder="Meta (ej. 100 comentarios esta semana)"><input id="seg-mobj" type="number" placeholder="Objetivo" style="width:110px;flex:none"><button class="ghost" onclick="guardarMeta()">Guardar</button></div>
-          </div>
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>Avance de atención</div>
+          <div class="progbar"><div id="cas-bar" style="width:0"></div></div>
+          <div class="muted" id="cas-avance" style="margin-top:8px"></div>
         </div>
-        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M8 3h8v4a4 4 0 0 1-8 0V3z"/><path d="M6 4H4a3 3 0 0 0 3 5"/><path d="M18 4h2a3 3 0 0 1-3 5"/><path d="M10 14h4v3h-4z"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Actividad por persona <span class="muted" style="font-weight:400">· evidencias subidas</span></div>
-          <div id="seg-persona"></div>
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M8 3h8v4a4 4 0 0 1-8 0V3z"/><path d="M6 4H4a3 3 0 0 0 3 5"/><path d="M18 4h2a3 3 0 0 1-3 5"/><path d="M10 14h4v3h-4z"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Reparto por zona <span class="muted" style="font-weight:400">· municipio del caso</span></div>
+          <div id="cas-zonas"></div>
         </div>
       </div>
-      <div id="kanban" style="margin-top:16px"><span class="muted">Cargando…</span></div>
+      <div class="aviso" id="cas-aviso" style="display:none"></div>
+      <div id="tablero"><span class="muted">Cargando…</span></div>
     </section>
 
     <!-- REDES (war room digital) -->
     <section id="redes" class="hide">
-      <h1>Acciones en redes</h1><div class="sub">Coordinación del equipo: qué comentar, qué reaccionar, con qué perfil y en qué link <span class="tag" id="red-pend"></span></div>
+      <h1>Acciones en redes</h1><div class="sub">Coordinación del equipo y tablero de publicaciones — arrastra o usa ◀ ▶ para mover el estado <span class="tag" id="red-pend"></span></div>
       <div class="bento">
         <div class="card c2" id="red-form-card"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Nueva acción</div>
           <select id="r-red"><option value="Facebook">Facebook</option><option>Instagram</option><option>Otro</option></select>
@@ -1325,6 +1459,19 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div id="red-list"><span class="muted">Cargando…</span></div>
         </div>
       </div>
+      <div class="bento" style="margin-top:18px">
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>Meta y avance</div>
+          <div class="progbar"><div id="seg-bar" style="width:0"></div></div>
+          <div class="muted" id="seg-metanum" style="margin-top:8px"></div>
+          <div id="seg-metaform" style="margin-top:10px">
+            <div class="barbusq"><input id="seg-mtexto" placeholder="Meta (ej. 100 comentarios esta semana)"><input id="seg-mobj" type="number" placeholder="Objetivo" style="width:110px;flex:none"><button class="ghost" onclick="guardarMeta()">Guardar</button></div>
+          </div>
+        </div>
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M8 3h8v4a4 4 0 0 1-8 0V3z"/><path d="M6 4H4a3 3 0 0 0 3 5"/><path d="M18 4h2a3 3 0 0 1-3 5"/><path d="M10 14h4v3h-4z"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Actividad por persona <span class="muted" style="font-weight:400">· evidencias subidas</span></div>
+          <div id="seg-persona"></div>
+        </div>
+      </div>
+      <div id="kanban" style="margin-top:16px"><span class="muted">Cargando…</span></div>
     </section>
 
     <!-- AUDITORÍA -->
@@ -1921,6 +2068,7 @@ async function cargarRedes(){
   $('#red-pend').textContent=a.filter(x=>x.estado!=='hecho').length+' pendientes';
   const card=$('#red-form-card'); if(card) card.style.display=puedeEditar()?'':'none';
   $('#red-list').innerHTML=a.length?a.map(tarjetaRed).join(''):'<span class="muted">Sin acciones aún. Crea la primera arriba.</span>';
+  cargarPublicaciones();
 }
 async function abrirEdit(id){
   const a=await(await fetch('/api/acciones')).json();
@@ -1932,7 +2080,7 @@ function cerrarEdit(){$('#editmodal').classList.add('hide');}
 async function guardarEdit(){
   const b={id:parseInt($('#e-id').value),red:$('#e-red').value,link:$('#e-link').value,accion:$('#e-accion').value,perfil:$('#e-perfil').value,comentario:$('#e-com').value};
   await fetch('/api/acciones/editar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
-  cerrarEdit(); cargarRedes(); if($('#seguimiento')&&!$('#seguimiento').classList.contains('hide'))cargarSeguimiento();
+  cerrarEdit(); cargarRedes();
 }
 async function addAccion(){
   const link=$('#r-link').value.trim();
@@ -1954,10 +2102,78 @@ async function subirEvidencia(id,input){
 async function delAccion(id){if(confirm('¿Eliminar esta acción?')){await fetch('/api/acciones/eliminar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});cargarRedes();}}
 function copiar(btn,txt){navigator.clipboard.writeText(txt).then(()=>{const o=btn.innerHTML;btn.innerHTML=ICONS.check;setTimeout(()=>btn.innerHTML=o,1500);});}
 
-// --- seguimiento (kanban) ---
-const KORDER=['porhacer','proceso','hecho','evidencia'];
+// --- seguimiento (tablero de casos) ---
+// Un CASO es una conversación que el agente marcó para seguimiento. El equipo la empuja
+// por fases hasta cerrarla: Nuevo -> En seguimiento -> Canalizado -> Resuelto. La fase se
+// guarda en el servidor por número, así que el tablero es el mismo para todo el equipo.
+const FASES=['nuevo','seguimiento','canalizado','resuelto'];
+const FASEICONS={nuevo:ICONS.chat,seguimiento:ICONS.clock,canalizado:ICONS.share,resuelto:ICONS.check};
+let _casosMin=30,_casosPuedo=false;
 async function cargarSeguimiento(){
-  const s=await(await fetch('/api/seguimiento')).json();
+  const s=await(await fetch('/api/casos')).json();
+  _casosPuedo=!!s.puede_operar; _casosMin=s.minutos||30;
+  $('#cas-bar').style.width=(s.pct||0)+'%';
+  $('#cas-avance').innerHTML=s.total
+    ? `<b>${s.resueltos}</b> de <b>${s.total}</b> casos resueltos (${s.pct}%)`
+    : 'Todavía no hay casos. Aquí caen las conversaciones que el agente marca para seguimiento.';
+  const zmax=Math.max(1,...s.por_zona.map(x=>x[1]));
+  $('#cas-zonas').innerHTML=s.por_zona.length
+    ? s.por_zona.map(([k,v])=>`<div class="bar"><div class="nm">${esc(k)}</div><div class="track"><div class="fill" style="width:${Math.round(v/zmax*100)}%"></div></div><div class="vv">${v}</div></div>`).join('')
+    : '<span class="muted">Sin municipio capturado en los casos</span>';
+  const av=$('#cas-aviso');
+  av.style.display=_casosPuedo?'':'none';
+  av.innerHTML='<b>&ldquo;Contesto yo&rdquo;</b> le quita el chat al agente por unos minutos para que respondas tú desde el panel. Al vencer el plazo el agente retoma solo, con el contexto de lo que escribiste &mdash; <b>no hay que acordarse de reactivarlo</b>.';
+  // el modal de conversación saca el nombre de aqui, para no abrirlo solo con el numero
+  s.columnas.forEach(c=>c.items.forEach(x=>{ if(!_explorarCache[x.numero])_explorarCache[x.numero]={numero:x.numero,nombre:x.nombre}; }));
+  $('#tablero').innerHTML=s.columnas.map(c=>`<div class="kcol" ondragover="event.preventDefault();this.classList.add('over')" ondragleave="this.classList.remove('over')" ondrop="soltarCaso(event,'${c.key}')">
+    <h4><span>${FASEICONS[c.key]||''} ${c.titulo}</span><span class="tag">${c.items.length}</span></h4>
+    ${c.items.map(x=>casoTarjeta(x,c.key)).join('')||'<div class="muted" style="font-size:12px;text-align:center;padding:8px 0">&mdash;</div>'}
+  </div>`).join('');
+}
+function casoTarjeta(x,fase){
+  const i=FASES.indexOf(fase);
+  const mover=(j,txt)=>`<button class="btnmini" style="padding:3px 9px" onclick="moverCaso('${x.numero}','${FASES[j]}')">${txt}</button>`;
+  const izq=i>0?mover(i-1,'◀'):'', der=i<FASES.length-1?mover(i+1,'▶'):'';
+  const mins=[15,30,60].map(m=>`<option value="${m}"${m===_casosMin?' selected':''}>${m} min</option>`).join('');
+  const ops=_casosPuedo?`<div style="display:flex;gap:6px;margin-top:8px">
+      <select style="width:auto;flex:none;margin:0;padding:6px 8px;font-size:12px">${mins}</select>
+      <button class="btnmini" style="flex:1;justify-content:center" onclick="contestoYo('${x.numero}',this)">Contesto yo</button></div>`:'';
+  const donde=[x.colonia,x.municipio].filter(Boolean).map(esc).join(', ')||'Sin ubicación';
+  return `<div class="kcard" draggable="true" ondragstart="event.dataTransfer.setData('numero','${x.numero}')" style="border-left:4px solid var(--guinda)">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px">
+      <b style="font-size:13px">${esc(x.nombre||x.numero)}</b>${x.postura==='simpatizante'?`<span title="Simpatizante" style="color:#e0245e;display:inline-flex">${ICONS.heart}</span>`:''}${x.tipo?tag(x.tipo):''}${x.intervenida?'<span class="chip st">operador</span>':''}</div>
+    ${x.tema?`<div style="font-size:12.5px;line-height:1.35">${esc(x.tema)}</div>`:'<div class="muted" style="font-size:12.5px">Sin tema capturado</div>'}
+    <div class="muted" style="font-size:11.5px;margin-top:5px">${donde} &middot; ${esc(x.hace)} &middot; ${x.mensajes} msj</div>
+    <div style="margin-top:8px;display:flex;gap:5px;justify-content:flex-end">${izq}${der}</div>
+    ${ops}
+    <button class="btnmini" style="width:100%;justify-content:center;margin-top:6px" onclick="abrirExplorarModal('${x.numero}')">Abrir chat / responder &rarr;</button>
+  </div>`;
+}
+async function moverCaso(numero,fase){
+  const d=await(await fetch('/api/casos/fase',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({numero,fase})})).json();
+  if(d.error){alert(d.error);return;}
+  cargarSeguimiento();
+}
+async function soltarCaso(e,fase){
+  e.preventDefault();
+  document.querySelectorAll('.kcol').forEach(k=>k.classList.remove('over'));
+  const num=e.dataTransfer.getData('numero');
+  if(num)await moverCaso(num,fase);
+}
+async function contestoYo(numero,btn){
+  const minutos=parseInt(btn.parentNode.querySelector('select').value)||_casosMin;
+  const d=await(await fetch('/api/intervencion/tomar',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({numero,minutos})})).json();
+  if(d.error){alert(d.error);return;}
+  abrirExplorarModal(numero);   // ya tiene el control: que conteste de una vez
+  cargarSeguimiento();
+}
+
+// --- publicaciones (kanban dentro de Redes) ---
+const KORDER=['porhacer','proceso','hecho','evidencia'];
+async function cargarPublicaciones(){
+  const s=await(await fetch('/api/publicaciones')).json();
   const m=s.meta||{}, obj=m.objetivo||0, av=m.avance||0;
   const pct=obj>0?Math.min(100,Math.round(av/obj*100)):0;
   $('#seg-bar').style.width=pct+'%';
@@ -1985,9 +2201,9 @@ function ktarjeta(x,col){
       <span style="display:flex;gap:4px">${izq}${der}${edit}</span>
     </div></div>`;
 }
-async function moverCol(id,col){await fetch('/api/acciones/columna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,columna:col})});cargarSeguimiento();}
+async function moverCol(id,col){await fetch('/api/acciones/columna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,columna:col})});cargarPublicaciones();}
 async function soltar(e,col){e.preventDefault();document.querySelectorAll('.kcol').forEach(k=>k.classList.remove('over'));const id=parseInt(e.dataTransfer.getData('id'));if(!isNaN(id))await moverCol(id,col);}
-async function guardarMeta(){await fetch('/api/meta',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texto:$('#seg-mtexto').value,objetivo:$('#seg-mobj').value})});cargarSeguimiento();}
+async function guardarMeta(){await fetch('/api/meta',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({texto:$('#seg-mtexto').value,objetivo:$('#seg-mobj').value})});cargarPublicaciones();}
 
 // --- conexión Green API ---
 function bloquearGreen(){
