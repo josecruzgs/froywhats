@@ -423,6 +423,15 @@ FASES = [("nuevo", "Nuevo"), ("seguimiento", "En seguimiento"),
          ("canalizado", "Canalizado"), ("resuelto", "Resuelto")]
 FASE_KEYS = {k for k, _ in FASES}
 
+# A dónde se turna un caso cuando se canaliza. Edita esta lista si la campaña trabaja con
+# otras dependencias: el panel arma el selector solo, no hay nada más que tocar.
+DEPENDENCIAS = [
+    "OOMAPAS / Agua", "CFE / Luz", "Servicios Públicos (baches, alumbrado)",
+    "Seguridad Pública", "Salud / IMSS", "SEC / Educación", "DIF / Asistencia social",
+    "Bienestar / Programas federales", "Empleo", "Vivienda / Infonavit",
+    "Coordinación de zona", "Otra",
+]
+
 def cargar_casos():
     if os.path.exists(CASOS_F):
         try: return json.load(open(CASOS_F))
@@ -431,6 +440,43 @@ def cargar_casos():
 
 def guardar_casos(c):
     json.dump(c, open(CASOS_F, "w"), ensure_ascii=False, indent=2)
+
+def _fase_por_defecto(numero, atendidos=None):
+    """Un caso que nadie ha movido arranca en Nuevo, salvo que la bandeja de Escalados ya
+    lo tenga por atendido (el tablero llegó después que la bandeja)."""
+    atendidos = _cargar_set(ESCAL_F) if atendidos is None else atendidos
+    return "resuelto" if numero in atendidos else "nuevo"
+
+def _caso_de(numero):
+    c = dict(cargar_casos().get(numero) or {})
+    if c.get("fase") not in FASE_KEYS:
+        c["fase"] = _fase_por_defecto(numero)
+    c.setdefault("dependencia", None)
+    c.setdefault("notas", [])
+    return c
+
+def _actualizar_caso(numero, fase=None, dependencia=None, nota=None):
+    """Guarda la gestión del caso. Las notas se acumulan (nunca se pisan): son la bitácora
+    interna del expediente, no se le envían al ciudadano."""
+    casos = cargar_casos()
+    c = casos.get(numero) or {}
+    if fase:
+        c["fase"] = fase
+    if dependencia is not None:
+        c["dependencia"] = dependencia or None
+    if nota:
+        c.setdefault("notas", []).append(
+            {"texto": nota, "autor": getattr(g, "usuario", ""),
+             "fecha": datetime.datetime.now().isoformat(timespec="minutes")})
+    c["por"] = getattr(g, "usuario", "")
+    c["actualizado_en"] = datetime.datetime.now().isoformat(timespec="minutes")
+    casos[numero] = c
+    guardar_casos(casos)
+    if fase:   # que la bandeja de Escalados diga lo mismo que el tablero
+        atend = _cargar_set(ESCAL_F)
+        atend.add(numero) if fase == "resuelto" else atend.discard(numero)
+        json.dump(sorted(atend), open(ESCAL_F, "w"))
+    return _caso_de(numero)
 
 def _hace(iso):
     """'hace 3 d' para la tarjeta: cuánto lleva el caso sin movimiento."""
@@ -456,9 +502,9 @@ def api_casos():
         # solo entran las que el agente marcó para seguimiento (o las que alguien ya movió)
         if not c["escalar"] and not guardado:
             continue
-        fase = guardado.get("fase") or ("resuelto" if num in atendidos else "nuevo")
+        fase = guardado.get("fase")
         if fase not in FASE_KEYS:
-            fase = "nuevo"
+            fase = _fase_por_defecto(num, atendidos)
         perfil = perfiles.get(num) or {}
         items.append({"numero": num, "nombre": perfil.get("nombre"), "fase": fase,
                       "postura": perfil.get("postura"),
@@ -467,6 +513,8 @@ def api_casos():
                       "mensajes": c["mensajes"], "hace": _hace(c["fecha"]),
                       "fecha": (c["fecha"] or "")[:16].replace("T", " "),
                       "intervenida": num in operando,
+                      "dependencia": guardado.get("dependencia"),
+                      "notas": len(guardado.get("notas") or []),
                       "movido_por": guardado.get("por"), "movido_en": guardado.get("actualizado_en")})
     items.sort(key=lambda x: x["fecha"], reverse=True)
     resueltos = sum(1 for x in items if x["fase"] == "resuelto")
@@ -477,26 +525,44 @@ def api_casos():
         "total": len(items), "resueltos": resueltos,
         "pct": round(100 * resueltos / len(items)) if items else 0,
         "por_zona": zonas.most_common(6),
+        "por_dependencia": Counter(x["dependencia"] for x in items if x["dependencia"]).most_common(6),
         "minutos": intervenciones.MINUTOS_DEFAULT,
         "puede_operar": getattr(g, "rol", None) in ("admin", "coordinador"),
     })
 
 @app.post("/api/casos/fase")
 def api_casos_fase():
+    """Mover la tarjeta en el tablero (arrastrar o las flechas)."""
     d = request.get_json(force=True) or {}
     num, fase = (d.get("numero") or "").strip(), d.get("fase")
     if not num:
         return jsonify({"error": "falta el número"}), 400
     if fase not in FASE_KEYS:
         return jsonify({"error": "fase inválida"}), 400
-    casos = cargar_casos()
-    casos[num] = {"fase": fase, "por": getattr(g, "usuario", ""),
-                  "actualizado_en": datetime.datetime.now().isoformat(timespec="minutes")}
-    guardar_casos(casos)
-    atend = _cargar_set(ESCAL_F)     # que la bandeja de Escalados diga lo mismo
-    atend.add(num) if fase == "resuelto" else atend.discard(num)
-    json.dump(sorted(atend), open(ESCAL_F, "w"))
-    return jsonify({"ok": True, "fase": fase})
+    return jsonify({"ok": True, "caso": _actualizar_caso(num, fase=fase)})
+
+@app.post("/api/casos/gestion")
+def api_casos_gestion():
+    """Gestión desde el modal de la conversación: estatus, dependencia y nota de
+    seguimiento en una sola llamada. Los tres campos son opcionales."""
+    d = request.get_json(force=True) or {}
+    num = (d.get("numero") or "").strip()
+    if not num:
+        return jsonify({"error": "falta el número"}), 400
+    fase = d.get("fase")
+    if fase and fase not in FASE_KEYS:
+        return jsonify({"error": "estatus inválido"}), 400
+    dep = d.get("dependencia")
+    if dep is not None:
+        dep = (dep or "").strip()
+        if dep and dep not in DEPENDENCIAS:
+            return jsonify({"error": "dependencia inválida"}), 400
+    nota = (d.get("nota") or "").strip()
+    if len(nota) > 1500:
+        return jsonify({"error": "la nota es muy larga (máx. 1500 caracteres)"}), 400
+    if not fase and dep is None and not nota:
+        return jsonify({"error": "no hay nada que guardar"}), 400
+    return jsonify({"ok": True, "caso": _actualizar_caso(num, fase=fase, dependencia=dep, nota=nota)})
 
 # ---------- API: explorar y exportar ----------
 def _hilo(regs):
@@ -526,6 +592,7 @@ def _paquete_intervencion(numero):
     regs = [r for r in cargar_registros() if (r.get("numero") or "?") == numero]
     regs.sort(key=lambda r: r.get("fecha") or "")
     return {"numero": numero, "contacto": _contacto_de(numero), "historial": _hilo(regs),
+            "caso": _caso_de(numero), "fases": FASES, "dependencias": DEPENDENCIAS,
             "intervencion": {"activa": bool(st),
                              "operador": st["operador"] if st else None,
                              "mio": bool(st) and st["operador"] == getattr(g, "usuario", ""),
@@ -1434,7 +1501,7 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
           <div class="progbar"><div id="cas-bar" style="width:0"></div></div>
           <div class="muted" id="cas-avance" style="margin-top:8px"></div>
         </div>
-        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M8 3h8v4a4 4 0 0 1-8 0V3z"/><path d="M6 4H4a3 3 0 0 0 3 5"/><path d="M18 4h2a3 3 0 0 1-3 5"/><path d="M10 14h4v3h-4z"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Reparto por zona <span class="muted" style="font-weight:400">· municipio del caso</span></div>
+        <div class="card c2"><div class="h"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1.5 align-[-3px] shrink-0"><path d="M8 3h8v4a4 4 0 0 1-8 0V3z"/><path d="M6 4H4a3 3 0 0 0 3 5"/><path d="M18 4h2a3 3 0 0 1-3 5"/><path d="M10 14h4v3h-4z"/><path d="M8 21h8"/><path d="M12 17v4"/></svg><span id="cas-repartotit">Reparto por zona</span> <span class="muted" style="font-weight:400" id="cas-repartosub">· municipio del caso</span></div>
           <div id="cas-zonas"></div>
         </div>
       </div>
@@ -1583,7 +1650,10 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
       <span class="chip st ok" id="ex-estado">Contesta el agente</span>
     </div>
     <div class="opsgrid">
-      <div class="ficha" id="ex-ficha"></div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="ficha" id="ex-ficha"></div>
+        <div class="ficha" id="ex-gestion" style="display:none"></div>
+      </div>
       <div>
         <div class="chat" id="ex-modal-chat" style="height:44vh"></div>
         <div id="ex-envio" class="hide">
@@ -1826,6 +1896,7 @@ function renderExplorar(){
 // el webhook, que es otro proceso) y lleva su propio contador regresivo.
 const OPS_POLL_MS=5000;
 let _exNum=null, _exPoll=null, _exTick=null, _exRestante=0, _exMio=false, _exPuedo=false;
+let _exFases=[], _exDeps=[];
 const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 const mmss=s=>{s=Math.max(0,Math.round(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');};
 
@@ -1838,6 +1909,7 @@ function abrirExplorarModal(numero){
   $('#ex-ficha').innerHTML='';
   $('#ex-flash').textContent='';
   $('#ex-txt').value='';
+  const gest=$('#ex-gestion'); gest.style.display='none'; gest.dataset.firma=''; gest.innerHTML='';
   $('#exmodal').classList.remove('hide');
   refrescarConversacion(true);
   clearInterval(_exPoll); _exPoll=setInterval(()=>refrescarConversacion(false),OPS_POLL_MS);
@@ -1856,6 +1928,9 @@ async function refrescarConversacion(irAlFinal){
   pintarFicha(d.contacto||{});
   pintarHilo(d.historial||[],irAlFinal);
   pintarControl(d.intervencion||{},d.minutos||30);
+  if(d.fases)_exFases=d.fases;
+  if(d.dependencias)_exDeps=d.dependencias;
+  pintarGestion(d.caso||{});
 }
 function pintarFicha(c){
   const p=c.postura||'sin_datos';
@@ -1878,6 +1953,48 @@ function pintarFicha(c){
   const tel=(c.numero||'').replace(/[^0-9]/g,''), wa=$('#ex-wa');
   if(tel&&c.numero!=='prueba'){wa.style.display='inline-flex';wa.href='https://wa.me/'+tel;wa.textContent='Abrir en WhatsApp';}
   else wa.style.display='none';
+}
+// Gestión del caso: estatus, canalización y bitácora, sin salir de la conversacion.
+// El modal se refresca solo cada pocos segundos, así que solo repinta cuando algo cambió
+// y nunca mientras el operador está escribiendo una nota.
+function pintarGestion(c){
+  const box=$('#ex-gestion'); if(!box)return;
+  const notas=c.notas||[], firma=JSON.stringify([c.fase,c.dependencia,notas.length]);
+  const nota=$('#ex-nota'), escribiendo=box.contains(document.activeElement)||(nota&&nota.value.trim());
+  if(box.dataset.firma===firma)return;
+  if(box.dataset.firma&&escribiendo)return;
+  box.dataset.firma=firma;
+  box.style.display='';
+  const fases=_exFases.map(([k,t])=>`<option value="${k}"${k===c.fase?' selected':''}>${esc(t)}</option>`).join('');
+  const deps=['<option value="">&mdash; sin canalizar &mdash;</option>'].concat(
+    _exDeps.map(x=>`<option${x===c.dependencia?' selected':''}>${esc(x)}</option>`)).join('');
+  const bitacora=notas.length
+    ? `<div class="fl" style="margin:4px 0 6px">Bitácora (${notas.length})</div>` + notas.slice().reverse().map(n=>
+        `<div style="border-left:2px solid var(--line);padding:2px 0 2px 8px;margin-bottom:7px">
+           <div style="font-size:12.5px;white-space:pre-wrap">${esc(n.texto)}</div>
+           <div class="muted" style="font-size:10.5px;margin-top:2px">${esc(n.autor||'equipo')} · ${esc((n.fecha||'').replace('T',' '))}</div>
+         </div>`).join('')
+    : '<span class="muted" style="font-size:12px">Sin notas todavía. Lo que escribas aquí queda en el expediente del caso; al ciudadano no le llega.</span>';
+  box.innerHTML=`<div class="h" style="font-size:13.5px;margin-bottom:2px">${ICONS.check} Gestión del caso</div>
+    <label>Estatus</label><select id="ex-fase">${fases}</select>
+    <label>Canalizar a dependencia</label><select id="ex-dep">${deps}</select>
+    <label>Agregar nota de seguimiento</label>
+    <textarea id="ex-nota" rows="3" placeholder="Ej. Ya se turnó a Servicios Públicos…"></textarea>
+    <button class="b1" style="width:100%;margin-top:8px" onclick="guardarGestion()">Guardar cambios</button>
+    <div class="flash" id="ex-gflash"></div>
+    <div style="margin-top:10px">${bitacora}</div>`;
+}
+async function guardarGestion(){
+  if(!_exNum)return;
+  const cuerpo={numero:_exNum,fase:$('#ex-fase').value,dependencia:$('#ex-dep').value,nota:$('#ex-nota').value};
+  const d=await(await fetch('/api/casos/gestion',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(cuerpo)})).json();
+  if(d.error){$('#ex-gflash').textContent='⚠ '+d.error;return;}
+  $('#ex-nota').value='';
+  $('#ex-gestion').dataset.firma='';   // forzar el repintado con la nota recién guardada
+  pintarGestion(d.caso||{});
+  $('#ex-gflash').textContent='✓ guardado';
+  if(!$('#seguimiento').classList.contains('hide'))cargarSeguimiento();
 }
 function pintarHilo(hist,irAlFinal){
   const chat=$('#ex-modal-chat');
@@ -2116,9 +2233,14 @@ async function cargarSeguimiento(){
   $('#cas-avance').innerHTML=s.total
     ? `<b>${s.resueltos}</b> de <b>${s.total}</b> casos resueltos (${s.pct}%)`
     : 'Todavía no hay casos. Aquí caen las conversaciones que el agente marca para seguimiento.';
-  const zmax=Math.max(1,...s.por_zona.map(x=>x[1]));
-  $('#cas-zonas').innerHTML=s.por_zona.length
-    ? s.por_zona.map(([k,v])=>`<div class="bar"><div class="nm">${esc(k)}</div><div class="track"><div class="fill" style="width:${Math.round(v/zmax*100)}%"></div></div><div class="vv">${v}</div></div>`).join('')
+  // mientras nadie canaliza, el reparto útil es el territorial; en cuanto hay casos
+  // canalizados manda la dependencia, que es a quien hay que cobrarle el pendiente
+  const porDep=s.por_dependencia||[], usaDep=porDep.length>0, reparto=usaDep?porDep:s.por_zona;
+  $('#cas-repartotit').textContent=usaDep?'Reparto por dependencia':'Reparto por zona';
+  $('#cas-repartosub').textContent=usaDep?'· a dónde se canalizó':'· municipio del caso';
+  const zmax=Math.max(1,...reparto.map(x=>x[1]));
+  $('#cas-zonas').innerHTML=reparto.length
+    ? reparto.map(([k,v])=>`<div class="bar"><div class="nm" style="width:132px;text-transform:none">${esc(k)}</div><div class="track"><div class="fill" style="width:${Math.round(v/zmax*100)}%"></div></div><div class="vv">${v}</div></div>`).join('')
     : '<span class="muted">Sin municipio capturado en los casos</span>';
   const av=$('#cas-aviso');
   av.style.display=_casosPuedo?'':'none';
@@ -2141,9 +2263,9 @@ function casoTarjeta(x,fase){
   const donde=[x.colonia,x.municipio].filter(Boolean).map(esc).join(', ')||'Sin ubicación';
   return `<div class="kcard" draggable="true" ondragstart="event.dataTransfer.setData('numero','${x.numero}')" style="border-left:4px solid var(--guinda)">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px">
-      <b style="font-size:13px">${esc(x.nombre||x.numero)}</b>${x.postura==='simpatizante'?`<span title="Simpatizante" style="color:#e0245e;display:inline-flex">${ICONS.heart}</span>`:''}${x.tipo?tag(x.tipo):''}${x.intervenida?'<span class="chip st">operador</span>':''}</div>
+      <b style="font-size:13px">${esc(x.nombre||x.numero)}</b>${x.postura==='simpatizante'?`<span title="Simpatizante" style="color:#e0245e;display:inline-flex">${ICONS.heart}</span>`:''}${x.tipo?tag(x.tipo):''}${x.dependencia?`<span class="chip acc">${esc(x.dependencia)}</span>`:''}${x.intervenida?'<span class="chip st">operador</span>':''}</div>
     ${x.tema?`<div style="font-size:12.5px;line-height:1.35">${esc(x.tema)}</div>`:'<div class="muted" style="font-size:12.5px">Sin tema capturado</div>'}
-    <div class="muted" style="font-size:11.5px;margin-top:5px">${donde} &middot; ${esc(x.hace)} &middot; ${x.mensajes} msj</div>
+    <div class="muted" style="font-size:11.5px;margin-top:5px">${donde} &middot; ${esc(x.hace)} &middot; ${x.mensajes} msj${x.notas?` &middot; ${x.notas} nota${x.notas===1?'':'s'}`:''}</div>
     <div style="margin-top:8px;display:flex;gap:5px;justify-content:flex-end">${izq}${der}</div>
     ${ops}
     <button class="btnmini" style="width:100%;justify-content:center;margin-top:6px" onclick="abrirExplorarModal('${x.numero}')">Abrir chat / responder &rarr;</button>
