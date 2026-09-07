@@ -11,6 +11,9 @@ Requiere ANTHROPIC_API_KEY (ver .env.example).
 """
 import os, re, glob, json, sys, datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tiempo     # reloj único: se guarda en UTC, el panel lo muestra en Tijuana
+
 try:
     import anthropic
 except ImportError:
@@ -317,7 +320,7 @@ def _auditar(mensaje, borrador_malo, motivos):
         os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
         with open(AUDIT, "a") as f:
             f.write(json.dumps({
-                "fecha": datetime.datetime.now().isoformat(timespec="seconds"),
+                "fecha": tiempo.iso(),
                 "mensaje": mensaje, "bloqueado": borrador_malo, "motivos": motivos,
             }, ensure_ascii=False) + "\n")
     except Exception:

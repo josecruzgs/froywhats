@@ -14,6 +14,7 @@ from flask import Flask, request, jsonify, Response
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agente, humanizar
+import tiempo     # mismo reloj que el panel: escribe en el mismo notas_mejora.jsonl
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(BASE, "data")
@@ -50,7 +51,7 @@ def chat():
 def nota():
     d = request.get_json(force=True)
     registro = {
-        "fecha": datetime.datetime.now().isoformat(timespec="seconds"),
+        "fecha": tiempo.iso(),
         "autor": (d.get("autor") or "anónimo").strip(),
         "mensaje": d.get("mensaje", ""),
         "respuesta": d.get("respuesta", ""),
@@ -73,7 +74,7 @@ def aprender():
         titulo = titulo or os.path.splitext(archivo.filename)[0]
     if not contenido:
         return jsonify({"error": "no hay contenido"}), 400
-    sello = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sello = tiempo.sello()
     nombre = f"{sello}-{_slug(titulo)}.md"
     ruta = os.path.join(APORTES, nombre)
     with open(ruta, "w") as f:

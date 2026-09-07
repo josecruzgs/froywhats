@@ -110,6 +110,10 @@ cd /opt/froy && git pull && systemctl restart froy-webhook froy-dashboard
 ```
 
 ## Notas
+- **Horario:** todo se guarda en UTC y el panel lo convierte a `America/Tijuana` al mostrarlo
+  (`src/tiempo.py`). No hace falta cambiarle la zona horaria al VPS ni poner `TZ=` en el `.env`:
+  el servidor puede quedarse en UTC. Si la campaña se mueve a otro huso, se pone `FROY_TZ` en el
+  `.env` y se reinician los servicios; los datos ya guardados no se tocan.
 - La transcripción de videos NO va en el VPS (es solo de la Mac).
 - `data/registros.jsonl` y `data/notas_mejora.jsonl` viven en el VPS; respáldalos de vez en cuando.
 - Para que el dashboard refleje aportes aprobados al instante ya recarga solo; si editas archivos

@@ -19,6 +19,7 @@ import humanizar   # ritmo humano: lectura, escritura por globos, pausas
 import green_api   # WhatsApp vía Green API (no oficial, por QR)
 import transcribir_audio  # transcripción de notas de voz (faster-whisper, CPU)
 import intervenciones      # toma de control humano desde el panel (modo operador)
+import tiempo              # reloj único: se guarda en UTC, el panel lo muestra en Tijuana
 
 MENSAJE_AUDIO_FALLIDO = "no pude escuchar bien tu audio 🙏 ¿me lo puedes escribir?"
 
@@ -97,7 +98,7 @@ def guardar_historial(numero, hist):
         con.execute(
             "INSERT INTO historial (numero, datos, actualizado_en) VALUES (?,?,?) "
             "ON CONFLICT(numero) DO UPDATE SET datos=excluded.datos, actualizado_en=excluded.actualizado_en",
-            (numero, json.dumps(hist, ensure_ascii=False), datetime.datetime.utcnow().isoformat()))
+            (numero, json.dumps(hist, ensure_ascii=False), tiempo.iso()))
         con.commit()
     finally:
         con.close()
@@ -131,9 +132,9 @@ def actualizar_contacto(numero, meta, canal):
         tema = meta.get("tema") or (prev[3] if prev else None)
         postura = meta.get("postura") or (prev[4] if prev else None)
         mensajes = (prev[5] if prev else 0) + 1
-        primera_vez = prev[6] if prev else datetime.datetime.utcnow().isoformat()
+        primera_vez = prev[6] if prev else tiempo.iso()
         jornada = int(bool(meta.get("jornada")) or bool(prev[7] if prev else False))
-        ahora = datetime.datetime.utcnow().isoformat()
+        ahora = tiempo.iso()
         con.execute("""
             INSERT INTO contactos (numero,nombre,ciudad,colonia,tema,postura,canal,mensajes,primera_vez,actualizado_en,jornada)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -223,7 +224,7 @@ def guardar_registro(numero, mensaje, salida, origen="whatsapp"):
     """Persiste el metadato georreferenciado para el CRM / segmentación."""
     meta = salida.get("meta", {})
     registro = {
-        "fecha": datetime.datetime.utcnow().isoformat(),
+        "fecha": tiempo.iso(),
         "origen": origen,
         "numero": numero,
         "mensaje": mensaje,

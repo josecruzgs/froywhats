@@ -18,6 +18,7 @@ import os, sys, json, time, datetime, sqlite3
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import green_api
+import tiempo       # reloj único: se guarda en UTC, el panel lo muestra en Tijuana
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(BASE, "data")
@@ -33,19 +34,19 @@ LOCK_TTL_SEG = 120         # si un worker muere con el lock tomado, se abandona 
 LOCK_ESPERA_MAX_SEG = 90   # cuánto espera un mensaje a que termine el anterior del mismo número
 
 
+# Los tres se delegan a tiempo.py para que el webhook, el panel y la bitácora midan con el
+# mismo reloj. `_parse` devuelve siempre una fecha con zona (las guardadas antes del cambio
+# no traen offset y se asumen UTC), así que se puede comparar con `_ahora()` sin reventar.
 def _ahora():
-    return datetime.datetime.utcnow()
+    return tiempo.ahora()
 
 
 def _iso(dt):
-    return dt.isoformat()
+    return tiempo.iso(dt)
 
 
 def _parse(s):
-    try:
-        return datetime.datetime.fromisoformat(s)
-    except (TypeError, ValueError):
-        return None
+    return tiempo.parse(s)
 
 
 def _db():
@@ -85,7 +86,12 @@ class _LockNumero:
             try:
                 ahora = _ahora()
                 vencido = _iso(ahora - datetime.timedelta(seconds=LOCK_TTL_SEG))
-                con.execute("DELETE FROM locks WHERE numero=? AND adquirido_en<?", (self.numero, vencido))
+                # La comparación es de texto, así que solo vale entre fechas del mismo
+                # formato. Un lock sin offset lo escribió un proceso anterior al cambio de
+                # reloj: ese worker ya no existe (el formato cambió en un restart), así que
+                # su lock está huérfano y se descarta igual que uno vencido.
+                con.execute("DELETE FROM locks WHERE numero=? AND (adquirido_en<? OR adquirido_en NOT LIKE '%+00:00')",
+                            (self.numero, vencido))
                 try:
                     con.execute("INSERT INTO locks (numero, adquirido_en) VALUES (?,?)",
                                 (self.numero, _iso(ahora)))

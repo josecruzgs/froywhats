@@ -16,6 +16,7 @@ from flask import Flask, request, jsonify, Response, g, abort
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agente, humanizar, green_api, intervenciones
+import tiempo     # reloj único: se guarda en UTC, aquí se muestra en Tijuana
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KB = os.path.join(BASE, "knowledge-base")
@@ -58,7 +59,13 @@ def listar_contactos():
         con.close()
     cols = ["numero", "nombre", "ciudad", "colonia", "tema", "postura", "canal",
             "mensajes", "primera_vez", "actualizado_en", "jornada"]
-    return [dict(zip(cols, f)) for f in filas]
+    contactos = [dict(zip(cols, f)) for f in filas]
+    # el ORDER BY ya hizo su trabajo sobre el UTC guardado; de aquí en adelante estas dos
+    # fechas solo se pintan, así que salen en hora de Tijuana
+    for c in contactos:
+        c["primera_vez"] = tiempo.fmt(c["primera_vez"])
+        c["actualizado_en"] = tiempo.fmt(c["actualizado_en"])
+    return contactos
 
 app = Flask(__name__)
 
@@ -224,7 +231,9 @@ def resumir_conversaciones(regs=None):
             c["colonia"] = r["colonia"]
         if r.get("escalar"):
             c["escalar"] = True
-        dia = (r.get("fecha") or "")[:10]
+        # el día se calcula en Tijuana, no recortando la cadena UTC: si no, todo lo que
+        # entra después de las 5 de la tarde se contaba en el día siguiente
+        dia = tiempo.dia(r.get("fecha"))
         if dia:
             c["dias"].add(dia)
         if (r.get("fecha") or "") > c["fecha"]:
@@ -304,8 +313,9 @@ def api_tendencias():
             if any(k in c["texto"] for k in kws):
                 conteo[tema] = conteo.get(tema, 0) + 1
     temas = sorted(conteo.items(), key=lambda x: -x[1])
-    # serie de los últimos 14 días (incluye días en cero)
-    hoy = datetime.date.today()
+    # serie de los últimos 14 días (incluye días en cero), en días de Tijuana: `today()`
+    # daba el día del servidor, que no siempre es el mismo que el de la campaña
+    hoy = tiempo.hoy()
     dias = [hoy - datetime.timedelta(days=i) for i in range(13, -1, -1)]
     porfecha = {}
     for c in convs:
@@ -393,17 +403,19 @@ def api_escalados():
         gp = grupos.setdefault(num, {"numero": num, "mensajes": [], "fecha": "",
                                      "municipio": None, "colonia": None, "temas": []})
         gp["mensajes"].append(r.get("mensaje", ""))
-        gp["fecha"] = (r.get("fecha") or "")[:16].replace("T", " ")
+        gp["fecha"] = r.get("fecha") or ""      # se guarda cruda (UTC) para poder ordenar
         gp["municipio"] = r.get("municipio") or gp["municipio"]
         gp["colonia"] = r.get("colonia") or gp["colonia"]
         for t in (r.get("tema"), r.get("motivo_escalamiento")):
             if t and t not in gp["temas"]:
                 gp["temas"].append(t)
-    items = [{"numero": g["numero"], "fecha": g["fecha"], "mensajes": g["mensajes"],
+    grupos = sorted(grupos.values(), key=lambda g: (g["numero"] in atend, g["fecha"]))
+    # se ordena por la fecha en UTC y recién entonces se pasa a hora de Tijuana: al revés,
+    # el orden dependería de un texto ya convertido
+    items = [{"numero": g["numero"], "fecha": tiempo.fmt(g["fecha"]), "mensajes": g["mensajes"],
               "n": len(g["mensajes"]), "municipio": g["municipio"], "colonia": g["colonia"],
               "tema": ", ".join(g["temas"][:3]), "atendido": g["numero"] in atend}
-             for g in grupos.values()]
-    items.sort(key=lambda x: (x["atendido"], x["fecha"]), reverse=False)
+             for g in grupos]
     return jsonify(items)
 
 @app.post("/api/escalados/atender")
@@ -452,7 +464,9 @@ def _caso_de(numero):
     if c.get("fase") not in FASE_KEYS:
         c["fase"] = _fase_por_defecto(numero)
     c.setdefault("dependencia", None)
-    c.setdefault("notas", [])
+    # las notas se copian antes de tocarles la fecha: este dict va a la pantalla, y lo que
+    # se vuelva a guardar tiene que conservar el UTC original
+    c["notas"] = [dict(n, fecha=tiempo.fmt(n.get("fecha"))) for n in (c.get("notas") or [])]
     return c
 
 def _actualizar_caso(numero, fase=None, dependencia=None, nota=None):
@@ -467,9 +481,9 @@ def _actualizar_caso(numero, fase=None, dependencia=None, nota=None):
     if nota:
         c.setdefault("notas", []).append(
             {"texto": nota, "autor": getattr(g, "usuario", ""),
-             "fecha": datetime.datetime.now().isoformat(timespec="minutes")})
+             "fecha": tiempo.iso()})
     c["por"] = getattr(g, "usuario", "")
-    c["actualizado_en"] = datetime.datetime.now().isoformat(timespec="minutes")
+    c["actualizado_en"] = tiempo.iso()
     casos[numero] = c
     guardar_casos(casos)
     if fase:   # que la bandeja de Escalados diga lo mismo que el tablero
@@ -479,12 +493,14 @@ def _actualizar_caso(numero, fase=None, dependencia=None, nota=None):
     return _caso_de(numero)
 
 def _hace(iso):
-    """'hace 3 d' para la tarjeta: cuánto lleva el caso sin movimiento."""
-    try:
-        f = datetime.datetime.fromisoformat((iso or "")[:19])
-    except ValueError:
+    """'hace 3 d' para la tarjeta: cuánto lleva el caso sin movimiento. Las dos fechas
+    van con zona: antes se restaba una guardada en UTC contra la hora local del VPS y el
+    resultado salía corrido por el offset (o en negativo)."""
+    f = tiempo.parse(iso)
+    if not f:
         return ""
-    seg = (datetime.datetime.now() - f).total_seconds()
+    seg = (tiempo.ahora() - f).total_seconds()
+    if seg < 60: return "hace un momento"
     if seg < 3600: return "hace %d min" % max(1, int(seg // 60))
     if seg < 86400: return "hace %d h" % int(seg // 3600)
     return "hace %d d" % int(seg // 86400)
@@ -511,12 +527,16 @@ def api_casos():
                       "tipo": c["tipo"], "tema": ", ".join(c["temas"][:2]),
                       "municipio": c["municipio"], "colonia": c["colonia"],
                       "mensajes": c["mensajes"], "hace": _hace(c["fecha"]),
-                      "fecha": (c["fecha"] or "")[:16].replace("T", " "),
+                      "_orden": c["fecha"] or "",   # UTC crudo: solo para ordenar
+                      "fecha": tiempo.fmt(c["fecha"]),
                       "intervenida": num in operando,
                       "dependencia": guardado.get("dependencia"),
                       "notas": len(guardado.get("notas") or []),
-                      "movido_por": guardado.get("por"), "movido_en": guardado.get("actualizado_en")})
-    items.sort(key=lambda x: x["fecha"], reverse=True)
+                      "movido_por": guardado.get("por"),
+                      "movido_en": tiempo.fmt(guardado.get("actualizado_en"))})
+    items.sort(key=lambda x: x["_orden"], reverse=True)
+    for x in items:
+        del x["_orden"]
     resueltos = sum(1 for x in items if x["fase"] == "resuelto")
     zonas = Counter(x["municipio"] for x in items if x["municipio"])
     return jsonify({
@@ -568,7 +588,7 @@ def api_casos_gestion():
 def _hilo(regs):
     """Registros de una persona como burbujas para el chat del modal. `quien` dice de dónde
     salió la respuesta: el agente o un operador que tomó el control."""
-    return [{"fecha": (r.get("fecha") or "")[:16].replace("T", " "),
+    return [{"fecha": tiempo.fmt(r.get("fecha")),
              "mensaje": r.get("mensaje", "") or "", "respuesta": r.get("respuesta", "") or "",
              "tipo": r.get("tipo"),
              "quien": "operador" if r.get("operador") else "agente",
@@ -678,7 +698,8 @@ def api_conversaciones():
         out.append({
             "numero": num,
             "nombre": nombres.get(num),
-            "fecha": (ultimo.get("fecha") or "")[:16].replace("T", " "),
+            "_orden": ultimo.get("fecha") or "",   # UTC crudo: solo para ordenar
+            "fecha": tiempo.fmt(ultimo.get("fecha")),
             "mensaje": ultimo.get("mensaje", ""),
             "tipo": ultimo.get("tipo"),
             "municipio": ultimo.get("municipio"),
@@ -690,7 +711,9 @@ def api_conversaciones():
             "n": len(regs),
             "historial": _hilo(regs),
         })
-    out.sort(key=lambda x: x["fecha"], reverse=True)
+    out.sort(key=lambda x: x["_orden"], reverse=True)
+    for x in out:
+        del x["_orden"]
     return jsonify({"total": len(out), "items": out})
 
 @app.get("/api/contactos")
@@ -716,7 +739,8 @@ def export_csv():
     w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for r in cargar_registros():
-        w.writerow(r)
+        # el CSV se abre en Excel en la oficina: va en hora de Tijuana, como el panel
+        w.writerow(dict(r, fecha=tiempo.fmt(r.get("fecha"))))
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment; filename=conversaciones_froy.csv"})
 
@@ -727,7 +751,10 @@ def api_auditoria():
     if os.path.exists(AUDITORIA_F):
         for l in open(AUDITORIA_F):
             if l.strip():
-                try: items.append(json.loads(l))
+                try:
+                    r = json.loads(l)
+                    r["fecha"] = tiempo.fmt(r.get("fecha"))
+                    items.append(r)
                 except: pass
     return jsonify(items[::-1][:200])
 
@@ -743,7 +770,12 @@ def guardar_acciones(a):
 
 @app.get("/api/acciones")
 def api_acciones():
-    return jsonify(cargar_acciones()[::-1])
+    # se copia cada acción antes de convertir la fecha: el archivo sigue guardando UTC,
+    # solo la respuesta sale en hora de Tijuana
+    return jsonify([dict(a, fecha=tiempo.fmt(a.get("fecha")),
+                         evidencias=[dict(e, fecha=tiempo.fmt(e.get("fecha")))
+                                     for e in (a.get("evidencias") or [])])
+                    for a in cargar_acciones()[::-1]])
 
 @app.post("/api/acciones")
 def api_acciones_add():
@@ -755,7 +787,7 @@ def api_acciones_add():
         return jsonify({"error": "falta el link"}), 400
     acc = cargar_acciones()
     nid = (max([x.get("id", 0) for x in acc]) + 1) if acc else 1
-    acc.append({"id": nid, "fecha": datetime.datetime.now().isoformat(timespec="minutes"),
+    acc.append({"id": nid, "fecha": tiempo.iso(),
                 "autor": getattr(g, "usuario", ""), "red": d.get("red", ""), "link": link,
                 "accion": d.get("accion", ""), "comentario": (d.get("comentario") or "").strip(),
                 "perfil": d.get("perfil", ""), "estado": "pendiente"})
@@ -808,7 +840,7 @@ def api_evidencia():
     ext = os.path.splitext(archivo.filename)[1].lower()
     if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"):
         return jsonify({"error": "formato no soportado (usa una imagen)"}), 400
-    sello = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    sello = tiempo.sello("%Y%m%d%H%M%S")
     nombre = f"{i}-{sello}{ext}"
     archivo.save(os.path.join(EVID_DIR, nombre))
     acc = cargar_acciones()
@@ -816,7 +848,7 @@ def api_evidencia():
         if x.get("id") == i:
             x.setdefault("evidencias", []).append(
                 {"archivo": nombre, "autor": getattr(g, "usuario", ""),
-                 "fecha": datetime.datetime.now().isoformat(timespec="minutes")})
+                 "fecha": tiempo.iso()})
             x["estado"] = "hecho"        # subir evidencia marca la acción como hecha
             x["columna"] = "evidencia"   # y la mueve a la columna 'Con evidencia' del kanban
     guardar_acciones(acc)
@@ -929,7 +961,7 @@ def api_chat():
     # registrar la prueba para que alimente las estadísticas
     with open(REGISTROS, "a") as f:
         f.write(json.dumps({
-            "fecha": datetime.datetime.now().isoformat(timespec="seconds"),
+            "fecha": tiempo.iso(),
             "origen": "prueba", "numero": "prueba", "mensaje": mensaje,
             "respuesta": respuesta,
             **{k: meta.get(k) for k in ("tipo", "tema", "municipio", "colonia",
@@ -949,7 +981,7 @@ def api_nota():
         return jsonify({"error": "nota vacía"}), 400
     with open(NOTAS, "a") as f:
         f.write(json.dumps({
-            "fecha": datetime.datetime.now().isoformat(timespec="seconds"),
+            "fecha": tiempo.iso(),
             "autor": (d.get("autor") or "anónimo").strip(),
             "mensaje": d.get("mensaje", ""), "respuesta": d.get("respuesta", ""),
             "nota": nota,
@@ -967,6 +999,7 @@ def api_notas():
         n.setdefault("estado", "resuelta" if n.get("resuelta") else "pendiente")
         n.setdefault("categoria", "otro"); n.setdefault("prioridad", "media")
         n.setdefault("respuesta_ideal", "")
+        n["fecha"] = tiempo.fmt(n.get("fecha"))   # solo para pintar; el archivo no se toca
     return jsonify(notas[::-1])
 
 @app.post("/api/nota/estado")
@@ -1015,7 +1048,7 @@ def api_aprender():
             titulo = titulo or os.path.splitext(archivo.filename)[0]
     if not contenido:
         return jsonify({"error": "no hay contenido"}), 400
-    sello = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sello = tiempo.sello()
     nombre = f"{sello}-{_slug(titulo)}.md"
     with open(os.path.join(APORTES, nombre), "w") as f:
         f.write(f"# {titulo or 'Aporte sin título'}\n\n"
@@ -1934,7 +1967,7 @@ async function refrescarConversacion(irAlFinal){
 }
 function pintarFicha(c){
   const p=c.postura||'sin_datos';
-  const fecha=v=>(v||'').slice(0,16).replace('T',' ')||'—';
+  const fecha=v=>v||'—';
   const fr=(l,v)=>`<div class="fr"><div class="fl">${l}</div><div class="fv">${v}</div></div>`;
   const dato=v=>v?esc(v):'<span class="muted">Sin datos</span>';
   $('#ex-ficha').innerHTML=
@@ -1972,7 +2005,7 @@ function pintarGestion(c){
     ? `<div class="fl" style="margin:4px 0 6px">Bitácora (${notas.length})</div>` + notas.slice().reverse().map(n=>
         `<div style="border-left:2px solid var(--line);padding:2px 0 2px 8px;margin-bottom:7px">
            <div style="font-size:12.5px;white-space:pre-wrap">${esc(n.texto)}</div>
-           <div class="muted" style="font-size:10.5px;margin-top:2px">${esc(n.autor||'equipo')} · ${esc((n.fecha||'').replace('T',' '))}</div>
+           <div class="muted" style="font-size:10.5px;margin-top:2px">${esc(n.autor||'equipo')} · ${esc(n.fecha||'')}</div>
          </div>`).join('')
     : '<span class="muted" style="font-size:12px">Sin notas todavía. Lo que escribas aquí queda en el expediente del caso; al ciudadano no le llega.</span>';
   box.innerHTML=`<div class="h" style="font-size:13.5px;margin-bottom:2px">${ICONS.check} Gestión del caso</div>
@@ -2088,7 +2121,7 @@ function renderContactos(){
   const pagina=_contactosList.slice(inicio,inicio+CT_POR_PAGINA);
   $('#ct-body').innerHTML=pagina.length?pagina.map(x=>{
     const p=x.postura||'sin_datos';
-    const fecha=(x.actualizado_en||'').slice(0,16).replace('T',' ');
+    const fecha=x.actualizado_en||'';
     const tema=x.tema?('<span title="'+x.tema.replace(/"/g,'&quot;')+'">'+x.tema.slice(0,40)+(x.tema.length>40?'…':'')+'</span>'):'<span class="muted">—</span>';
     return `<tr style="cursor:pointer" onclick="abrirContacto('${x.numero}')">
       <td>${x.numero}</td>
@@ -2122,8 +2155,8 @@ function abrirContacto(numero){
     fila('Jornada', x.jornada?chipJornada(true):'<span class="muted">Sin datos</span>') +
     fila('Canal', x.canal||'—') +
     fila('Mensajes', x.mensajes||0) +
-    fila('Primer contacto', (x.primera_vez||'').slice(0,16).replace('T',' ')||'—') +
-    fila('Última actividad', (x.actualizado_en||'').slice(0,16).replace('T',' ')||'—');
+    fila('Primer contacto', x.primera_vez||'—') +
+    fila('Última actividad', x.actualizado_en||'—');
   $('#contactomodal').classList.remove('hide');
 }
 function cerrarContacto(){$('#contactomodal').classList.add('hide');}

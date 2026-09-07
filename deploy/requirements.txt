@@ -5,3 +5,4 @@ flask>=3.0
 requests>=2.31
 gunicorn>=22.0
 faster-whisper>=1.0   # transcripción de audios en el dashboard (CPU)
+tzdata>=2024.1        # zona horaria America/Tijuana (el sistema la trae, esto la asegura)
