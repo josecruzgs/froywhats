@@ -20,13 +20,19 @@ except ImportError:
     sys.exit("Falta el SDK: pip install anthropic")
 
 # ---------- Config ----------
-MODELO_BORRADOR = os.environ.get("MODELO_BORRADOR", "claude-sonnet-4-6")
-MODELO_CRITICO  = os.environ.get("MODELO_CRITICO",  "claude-sonnet-4-6")
+MODELO_BORRADOR = os.environ.get("MODELO_BORRADOR", "claude-sonnet-5")
+MODELO_CRITICO  = os.environ.get("MODELO_CRITICO",  "claude-sonnet-5")
 MAX_LOOPS = int(os.environ.get("MAX_LOOPS", "2"))
 # Presupuesto de tokens del borrador. La respuesta al ciudadano es corta, pero el bloque
 # de `meta` que va en el mismo JSON puede alargarse (temas y motivos de escalamiento
 # descriptivos). Si se acaba a media meta, el JSON llega truncado: con 700 ya pasó.
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1400"))
+# Caché de prompt: el system prompt + la base de conocimiento son ~14 mil tokens que iban
+# completos en CADA llamada. Marcados así se cobran a la décima parte. Se usa TTL de 1 hora
+# porque en WhatsApp los mensajes llegan a ratos: el de 5 minutos se enfriaría entre plática
+# y plática y habría que reescribirlo cada vez.
+_CACHE = {"type": "ephemeral", "ttl": os.environ.get("CACHE_TTL", "1h")}
+LOG_CACHE = os.environ.get("LOG_CACHE", "0") == "1"
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _cargar_env():
@@ -211,22 +217,34 @@ def _bloques_contexto(contacto):
     return bloques
 
 def _system_con_contacto(contacto):
-    extra = _bloques_contexto(contacto)
-    if not extra:
-        return SYSTEM
-    return [{"type": "text", "text": SYSTEM}] + extra
+    """SYSTEM va SIEMPRE primero y marcado para caché: es idéntico llamada tras llamada, así
+    que se cobra a 1/10 en vez de reenviarse entero. Lo que cambia por contacto (nombre,
+    ciudad, nota del operador) va DESPUÉS del punto de corte; si fuera antes, cada número
+    distinto sería un prefijo distinto y el caché nunca pegaría."""
+    return [{"type": "text", "text": SYSTEM, "cache_control": _CACHE}] + _bloques_contexto(contacto)
+
+def _log_uso(resp, etiqueta):
+    """Comprobante de que el caché está pegando. Si `leido` sale en 0 llamada tras llamada,
+    algo rompió el prefijo y se está pagando todo a precio lleno. Se prende con LOG_CACHE=1."""
+    if not LOG_CACHE:
+        return
+    u = resp.usage
+    print(f"[uso {etiqueta}] nuevo={u.input_tokens} "
+          f"escrito={getattr(u, 'cache_creation_input_tokens', 0)} "
+          f"leido={getattr(u, 'cache_read_input_tokens', 0)} salida={u.output_tokens}", flush=True)
 
 # ---------- 1) Borrador ----------
 def _borrador(historial, contacto=None):
     resp = cliente.messages.create(
         model=MODELO_BORRADOR, max_tokens=MAX_TOKENS, system=_system_con_contacto(contacto),
         messages=historial)
+    _log_uso(resp, "borrador")
     return _json_de(_texto(resp))
 
 # ---------- 2) Crítica ----------
 CRITICO_SYS = """Eres editor del equipo de Froy. Revisas la respuesta ANTES de enviarse al ciudadano. Eres estricto pero JUSTO.
 
-REGLA CLAVE: al final de estas instrucciones tienes la BASE DE CONOCIMIENTO oficial. TODO lo que aparezca
+REGLA CLAVE: mas abajo en estas instrucciones tienes la BASE DE CONOCIMIENTO oficial. TODO lo que aparezca
 ahí (cifras, montos, programas de becas, hospitales, el portal becasycredito.sonora.gob.mx, el 40% de
 escuela privada, los teléfonos, etc.) está VERIFICADO y el bot SÍ puede decirlo — NO lo marques como
 inventado. Solo marca como inventado lo que NO esté respaldado por la base de conocimiento o la contradiga.
@@ -271,16 +289,46 @@ B) NATURALIDAD (que NO parezca bot). RECHAZA si la respuesta:
 Devuelve SOLO este JSON:
 {"ok": true|false, "problemas": ["..."], "sugerencia": "qué cambiar en concreto"}"""
 
+def _json_critica(texto):
+    """El veredicto del editor viene como {ok, problemas, sugerencia}: una forma DISTINTA a la
+    del borrador, así que no puede pasar por _json_de. Ese busca "respuesta" y, al no hallarla,
+    devuelve {respuesta, meta} sin `ok` — con lo cual el veredicto se perdía siempre, el loop
+    de refinamiento corría completo en cada mensaje aunque el editor hubiera aprobado, y el
+    refinado recibía una lista de problemas vacía."""
+    texto = _CERCAS.sub("", texto or "").strip()
+    ini, fin = _bloque_json(texto)
+    if ini < 0:
+        return None
+    bloque = texto[ini:fin] if fin > 0 else texto[ini:]
+    try:
+        d = json.loads(bloque, strict=False)
+    except json.JSONDecodeError:
+        d = _reparar_json(bloque)              # se acabó el presupuesto a media lista
+    return d if isinstance(d, dict) and "ok" in d else None
+
 def _critica(mensaje, borrador, contacto=None):
-    sysblocks = [{"type": "text", "text": CRITICO_SYS}] + _bloques_contexto(contacto)
-    sysblocks.append({"type": "text",
-                       "text": "\n\n===== BASE DE CONOCIMIENTO (todo esto es VERIFICADO) =====\n" + KB_TEXT,
-                       "cache_control": {"type": "ephemeral"}})
+    # Igual que en el borrador: primero lo fijo (instrucciones + base de conocimiento) con la
+    # marca de caché, y hasta el final lo que varía por contacto. Antes el bloque del contacto
+    # iba en medio, así que el prefijo cambiaba con cada número y el caché no servía de nada.
+    sysblocks = [
+        {"type": "text", "text": CRITICO_SYS},
+        {"type": "text",
+         "text": "\n\n===== BASE DE CONOCIMIENTO (todo esto es VERIFICADO) =====\n" + KB_TEXT,
+         "cache_control": _CACHE},
+    ] + _bloques_contexto(contacto)
     resp = cliente.messages.create(
-        model=MODELO_CRITICO, max_tokens=400, system=sysblocks,
+        model=MODELO_CRITICO, max_tokens=800, system=sysblocks,
         messages=[{"role": "user", "content":
             f"MENSAJE DEL CIUDADANO:\n{mensaje}\n\nRESPUESTA PROPUESTA:\n{borrador.get('respuesta','')}"}])
-    return _json_de(_texto(resp))
+    _log_uso(resp, "critica")
+    crit = _json_critica(_texto(resp))
+    if crit is None:
+        # Sin veredicto legible no tiene caso refinar a ciegas: al refinado le llegaría una
+        # lista de problemas vacía, que no corrige nada y sí cuesta dos llamadas más. Se deja
+        # pasar el borrador y mandan los filtros deterministas de _checar_duro.
+        print("Editor devolvió un veredicto ilegible; se deja pasar el borrador", flush=True)
+        return {"ok": True, "problemas": [], "sugerencia": ""}
+    return crit
 
 # ---------- 3) Refinar ----------
 def _refinar(historial, borrador, critica, contacto=None):
@@ -291,6 +339,7 @@ def _refinar(historial, borrador, critica, contacto=None):
     resp = cliente.messages.create(
         model=MODELO_BORRADOR, max_tokens=MAX_TOKENS, system=_system_con_contacto(contacto),
         messages=historial + [{"role": "user", "content": instr}])
+    _log_uso(resp, "refina")
     return _json_de(_texto(resp))
 
 # Red de seguridad determinista: groserías que nunca deben pasar.
