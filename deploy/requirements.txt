@@ -1,6 +1,7 @@
 # Dependencias de PRODUCCIÓN para el VPS (no incluye la transcripción de videos,
 # que solo corre en la Mac). Instala con: pip install -r deploy/requirements.txt
-anthropic>=0.40
+anthropic>=0.116,<1     # 0.116 es donde se verifico el cache con TTL de 1h; <1 evita
+                        # saltar a la mayor 1.x, que trae cambios que rompen
 flask>=3.0
 requests>=2.31
 gunicorn>=25.1          # 25.1 es el mínimo: las unidades de systemd usan --no-control-socket
